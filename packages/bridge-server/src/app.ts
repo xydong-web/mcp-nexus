@@ -40,6 +40,10 @@ export type CreateBridgeAppOptions = {
   host?: string;
 };
 
+export function resolveBridgeHost(hostOverride?: string): string {
+  return hostOverride ?? process.env.HOST ?? '0.0.0.0';
+}
+
 const ENABLE_QUERY_AUTH = process.env.ENABLE_QUERY_AUTH === 'true';
 const ENABLE_TAVILY_CREDITS_CHECK = process.env.ENABLE_TAVILY_CREDITS_CHECK !== 'false';
 
@@ -73,7 +77,7 @@ function getPrisma(): PrismaClient {
 }
 
 export function createBridgeApp(options: CreateBridgeAppOptions = {}): express.Express {
-  const host = options.host ?? process.env.HOST ?? '0.0.0.0';
+  const host = resolveBridgeHost(options.host);
 
   const app = createMcpExpressApp({ host });
   app.set('trust proxy', true);

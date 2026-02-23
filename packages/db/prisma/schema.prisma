@@ -164,6 +164,32 @@ model ServerSetting {
   updatedAt DateTime @updatedAt
 }
 
+model RegistrationRun {
+  id                    String   @id @default(cuid())
+  provider              String   @default("tavily")
+  status                String   @default("queued")
+  phase                 String   @default("queued")
+  totalCandidates       Int      @default(0)
+  completedCandidates   Int      @default(0)
+  failedCandidates      Int      @default(0)
+  importedCandidates    Int      @default(0)
+  retryCount            Int      @default(0)
+  throttleCount         Int      @default(0)
+  lastErrorClass        String?
+  lastErrorMessage      String?
+  requestJson           Json     @default(dbgenerated("'{}'"))
+  resultJson            Json     @default(dbgenerated("'{}'"))
+  statusCodeSummaryJson Json     @default(dbgenerated("'{}'"))
+  startedAt             DateTime?
+  finishedAt            DateTime?
+  stopRequestedAt       DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([status, updatedAt])
+}
+
 model BraveKey {
   id           String         @id @default(cuid())
   label        String         @unique

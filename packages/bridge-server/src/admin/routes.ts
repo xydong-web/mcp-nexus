@@ -3,6 +3,11 @@ import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@mcp-nexus/db';
 import type { TavilyKeySelectionStrategy, SearchSourceMode } from '@mcp-nexus/core';
 import { decryptAes256Gcm, encryptAes256Gcm, sha256Bytes, tryParseAes256GcmKeyFromEnv } from '../crypto/crypto.js';
+import {
+  buildRegistrationRunComputation,
+  type RegistrationCandidate,
+  type RegistrationFailure
+} from '../registration/adapter.js';
 import { FixedWindowRateLimiter } from '../auth/rateLimit.js';
 import { requireAdminToken } from './adminAuth.js';
 import { fetchTavilyCredits, releaseCreditsRefreshLock, tryAcquireCreditsRefreshLock } from '../tavily/credits.js';
@@ -60,6 +65,42 @@ function normalizeBasePath(raw: string): string {
   return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
 }
 
+const registrationRunControllers = new Map<string, AbortController>();
+
+function parseRegistrationCandidates(resultJson: unknown): RegistrationCandidate[] {
+  if (!resultJson || typeof resultJson !== 'object') return [];
+  const candidates = (resultJson as any).candidates;
+  if (!Array.isArray(candidates)) return [];
+  return candidates.filter((item) => {
+    if (!item || typeof item !== 'object') return false;
+    return typeof (item as any).label === 'string'
+      && typeof (item as any).maskedKey === 'string'
+      && typeof (item as any).keyEncryptedB64 === 'string';
+  }) as RegistrationCandidate[];
+}
+
+function parseRegistrationFailures(resultJson: unknown): RegistrationFailure[] {
+  if (!resultJson || typeof resultJson !== 'object') return [];
+  const failures = (resultJson as any).failures;
+  if (!Array.isArray(failures)) return [];
+  return failures.filter((item) => {
+    if (!item || typeof item !== 'object') return false;
+    return typeof (item as any).errorClass === 'string' && typeof (item as any).errorMessage === 'string';
+  }) as RegistrationFailure[];
+}
+
+function parseStatusCodeSummary(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object') return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      out[key] = parsed;
+    }
+  }
+  return out;
+}
+
 export function registerAdminRoutes(
   app: Express,
   prisma: PrismaClient,
@@ -90,6 +131,7 @@ export function registerAdminRoutes(
     const tavilyKeySelectionStrategy = await opts.serverSettings.getTavilyKeySelectionStrategy();
     const searchSourceMode = await opts.serverSettings.getSearchSourceMode();
     const researchEnabled = await opts.serverSettings.getResearchEnabled();
+    const registrationAutomationEnabled = await opts.serverSettings.getRegistrationAutomationEnabled();
     const grokSearchEnabled = await opts.serverSettings.getGrokSearchEnabled();
     const grokModelDefault = await opts.serverSettings.getGrokModelDefault();
     const grokExtraSourcesDefault = await opts.serverSettings.getGrokExtraSourcesDefault();
@@ -102,6 +144,7 @@ export function registerAdminRoutes(
       searchSourceMode,
       braveSearchEnabled: braveKeyCount > 0,
       researchEnabled,
+      registrationAutomationEnabled,
       grokSearchEnabled,
       grokModelDefault,
       grokExtraSourcesDefault,
@@ -116,6 +159,7 @@ export function registerAdminRoutes(
       tavilyKeySelectionStrategy,
       searchSourceMode,
       researchEnabled,
+      registrationAutomationEnabled,
       grokSearchEnabled,
       grokModelDefault,
       grokExtraSourcesDefault,
@@ -149,6 +193,14 @@ export function registerAdminRoutes(
         return;
       }
       await opts.serverSettings.setResearchEnabled(researchEnabled);
+    }
+
+    if (registrationAutomationEnabled !== undefined) {
+      if (typeof registrationAutomationEnabled !== 'boolean') {
+        res.status(400).json({ error: 'registrationAutomationEnabled must be a boolean' });
+        return;
+      }
+      await opts.serverSettings.setRegistrationAutomationEnabled(registrationAutomationEnabled);
     }
 
     if (grokSearchEnabled !== undefined) {
@@ -199,6 +251,7 @@ export function registerAdminRoutes(
     const updatedStrategy = await opts.serverSettings.getTavilyKeySelectionStrategy();
     const updatedMode = await opts.serverSettings.getSearchSourceMode();
     const updatedResearchEnabled = await opts.serverSettings.getResearchEnabled();
+    const updatedRegistrationAutomationEnabled = await opts.serverSettings.getRegistrationAutomationEnabled();
     const updatedGrokSearchEnabled = await opts.serverSettings.getGrokSearchEnabled();
     const updatedGrokModelDefault = await opts.serverSettings.getGrokModelDefault();
     const updatedGrokExtraSourcesDefault = await opts.serverSettings.getGrokExtraSourcesDefault();
@@ -214,6 +267,7 @@ export function registerAdminRoutes(
       searchSourceMode: updatedMode,
       braveSearchEnabled: braveKeyCount > 0,
       researchEnabled: updatedResearchEnabled,
+      registrationAutomationEnabled: updatedRegistrationAutomationEnabled,
       grokSearchEnabled: updatedGrokSearchEnabled,
       grokModelDefault: updatedGrokModelDefault,
       grokExtraSourcesDefault: updatedGrokExtraSourcesDefault,
@@ -1220,6 +1274,489 @@ export function registerAdminRoutes(
       total: tavilyTotal + braveTotal,
       byTool,
       topQueries
+    });
+  }));
+
+  // ==================== Tavily Registration Automation ====================
+
+  const registrationRunLimiter = new FixedWindowRateLimiter({
+    maxPerWindow: Number(process.env.ADMIN_REGISTRATION_RUN_RATE_LIMIT_PER_MINUTE ?? '6'),
+    windowMs: 60_000
+  });
+  const registrationImportLimiter = new FixedWindowRateLimiter({
+    maxPerWindow: Number(process.env.ADMIN_REGISTRATION_IMPORT_RATE_LIMIT_PER_MINUTE ?? '2'),
+    windowMs: 60_000
+  });
+
+  function asRegistrationRunResponse(run: any) {
+    const behaviorMapping =
+      run.resultJson && typeof run.resultJson === 'object' && (run.resultJson as any).behaviorMapping
+        ? (run.resultJson as any).behaviorMapping
+        : {};
+    const parsedCandidates = parseRegistrationCandidates(run.resultJson).map((candidate) => ({
+      email: candidate.email,
+      label: candidate.label,
+      maskedKey: candidate.maskedKey,
+      source: candidate.source
+    }));
+    const parsedFailures = parseRegistrationFailures(run.resultJson).map((failure) => ({
+      email: failure.email,
+      errorClass: failure.errorClass,
+      errorMessage: failure.errorMessage,
+      retryable: failure.retryable,
+      phase: failure.phase,
+      statusCode: failure.statusCode,
+      source: failure.source
+    }));
+
+    return {
+      id: run.id,
+      provider: run.provider,
+      status: run.status,
+      phase: run.phase,
+      totalCandidates: run.totalCandidates,
+      completedCandidates: run.completedCandidates,
+      failedCandidates: run.failedCandidates,
+      importedCandidates: run.importedCandidates,
+      retryCount: run.retryCount,
+      throttleCount: run.throttleCount,
+      lastErrorClass: run.lastErrorClass,
+      lastErrorMessage: run.lastErrorMessage,
+      statusCodeSummary: parseStatusCodeSummary(run.statusCodeSummaryJson),
+      stopRequestedAt: toIsoOrNull(run.stopRequestedAt),
+      startedAt: toIsoOrNull(run.startedAt),
+      finishedAt: toIsoOrNull(run.finishedAt),
+      createdAt: run.createdAt.toISOString(),
+      updatedAt: run.updatedAt.toISOString(),
+      behaviorMapping,
+      candidates: parsedCandidates,
+      failures: parsedFailures
+    };
+  }
+
+  app.get(p('/registration/settings'), requireAdmin, asyncHandler(async (_req, res) => {
+    const enabled = await opts.serverSettings.getRegistrationAutomationEnabled();
+    res.json({ enabled });
+  }));
+
+  app.patch(p('/registration/settings'), requireAdmin, asyncHandler(async (req, res) => {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+    const next = await opts.serverSettings.setRegistrationAutomationEnabled(enabled);
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'registration.settings.update',
+        outcome: 'success',
+        detailsJson: { enabled: next }
+      }
+    }).catch(() => {});
+    res.json({ ok: true, enabled: next });
+  }));
+
+  app.post(p('/registration/runs'), requireAdmin, asyncHandler(async (req, res) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? null;
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    if (!registrationRunLimiter.tryAcquire(ip ?? 'unknown')) {
+      res.status(429).json({ error: 'Rate limit exceeded', retryAfterMs: 60_000 });
+      return;
+    }
+
+    const enabled = await opts.serverSettings.getRegistrationAutomationEnabled();
+    if (!enabled) {
+      res.status(403).json({ error: 'Registration automation is disabled by policy' });
+      return;
+    }
+
+    const body = req.body ?? {};
+    const resultsText = typeof body.resultsText === 'string' ? body.resultsText : '';
+    const failedText = typeof body.failedText === 'string' ? body.failedText : '';
+    const maxRetries = Number.isFinite(Number(body.maxRetries)) ? Number(body.maxRetries) : undefined;
+    const cooldownMs = Number.isFinite(Number(body.cooldownMs)) ? Number(body.cooldownMs) : undefined;
+    const labelPrefix = typeof body.labelPrefix === 'string' ? body.labelPrefix : undefined;
+
+    if (!resultsText.trim() && !failedText.trim()) {
+      res.status(400).json({ error: 'resultsText or failedText is required' });
+      return;
+    }
+
+    const run = await prisma.registrationRun.create({
+      data: {
+        provider: 'tavily',
+        status: 'queued',
+        phase: 'queued',
+        requestJson: {
+          resultsLineCount: resultsText.split(/\r?\n/).filter((line: string) => line.trim().length > 0).length,
+          failedLineCount: failedText.split(/\r?\n/).filter((line: string) => line.trim().length > 0).length,
+          maxRetries: maxRetries ?? null,
+          cooldownMs: cooldownMs ?? null,
+          labelPrefix: labelPrefix ?? null
+        }
+      }
+    });
+
+    const abortController = new AbortController();
+    registrationRunControllers.set(run.id, abortController);
+
+    void (async () => {
+      try {
+        await prisma.registrationRun.update({
+          where: { id: run.id },
+          data: {
+            status: 'running',
+            phase: 'temp_mail',
+            startedAt: new Date(),
+            lastErrorClass: null,
+            lastErrorMessage: null
+          }
+        });
+
+        const computed = await buildRegistrationRunComputation(
+          { resultsText, failedText, maxRetries, cooldownMs, labelPrefix },
+          { encryptionKey, signal: abortController.signal }
+        );
+
+        await prisma.registrationRun.update({
+          where: { id: run.id },
+          data: {
+            status: computed.status,
+            phase: computed.phase,
+            totalCandidates: computed.totalCandidates,
+            completedCandidates: computed.completedCandidates,
+            failedCandidates: computed.failedCandidates,
+            retryCount: computed.retryCount,
+            throttleCount: computed.throttleCount,
+            lastErrorClass: computed.lastErrorClass,
+            lastErrorMessage: computed.lastErrorMessage,
+            resultJson: {
+              behaviorMapping: computed.behaviorMapping,
+              candidates: computed.candidates,
+              failures: computed.failures
+            },
+            statusCodeSummaryJson: computed.statusCodeSummary,
+            finishedAt: new Date()
+          }
+        });
+
+        await prisma.auditLog.create({
+          data: {
+            eventType: 'registration.run.finish',
+            outcome: computed.failedCandidates > 0 ? 'partial' : 'success',
+            resourceType: 'registration_run',
+            resourceId: run.id,
+            detailsJson: {
+              status: computed.status,
+              completedCandidates: computed.completedCandidates,
+              failedCandidates: computed.failedCandidates,
+              retryCount: computed.retryCount,
+              throttleCount: computed.throttleCount
+            }
+          }
+        }).catch(() => {});
+      } catch (err: any) {
+        const aborted = abortController.signal.aborted;
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        await prisma.registrationRun.update({
+          where: { id: run.id },
+          data: {
+            status: aborted ? 'canceled' : 'failed',
+            phase: aborted ? 'canceled' : 'finalize',
+            lastErrorClass: aborted ? 'unknown' : 'unknown',
+            lastErrorMessage: aborted ? 'Run canceled by operator' : errorMessage.slice(0, 1000),
+            finishedAt: new Date()
+          }
+        }).catch(() => {});
+        await prisma.auditLog.create({
+          data: {
+            eventType: 'registration.run.finish',
+            outcome: aborted ? 'canceled' : 'error',
+            resourceType: 'registration_run',
+            resourceId: run.id,
+            detailsJson: {
+              error: errorMessage.slice(0, 1000),
+              aborted
+            }
+          }
+        }).catch(() => {});
+      } finally {
+        registrationRunControllers.delete(run.id);
+      }
+    })();
+
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'registration.run.create',
+        outcome: 'accepted',
+        resourceType: 'registration_run',
+        resourceId: run.id,
+        ip,
+        userAgent,
+        detailsJson: {
+          provider: 'tavily',
+          hasResultsText: Boolean(resultsText.trim()),
+          hasFailedText: Boolean(failedText.trim())
+        }
+      }
+    }).catch(() => {});
+
+    res.status(202).json({
+      ok: true,
+      runId: run.id,
+      status: run.status
+    });
+  }));
+
+  app.get(p('/registration/runs'), requireAdmin, asyncHandler(async (req, res) => {
+    const limitRaw = Number.parseInt(req.query.limit as string, 10);
+    const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20, 100);
+    const statusQuery = typeof req.query.status === 'string' ? req.query.status.trim() : '';
+    const where = statusQuery ? { status: statusQuery } : undefined;
+    const runs = await prisma.registrationRun.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit
+    });
+    res.json({
+      runs: runs.map((run) => asRegistrationRunResponse(run))
+    });
+  }));
+
+  app.get(p('/registration/runs/:id'), requireAdmin, asyncHandler(async (req, res) => {
+    const run = await prisma.registrationRun.findUnique({ where: { id: req.params.id } });
+    if (!run) {
+      res.status(404).json({ error: 'Registration run not found' });
+      return;
+    }
+    res.json(asRegistrationRunResponse(run));
+  }));
+
+  app.post(p('/registration/runs/:id/cancel'), requireAdmin, asyncHandler(async (req, res) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? null;
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    const run = await prisma.registrationRun.findUnique({ where: { id: req.params.id } });
+    if (!run) {
+      res.status(404).json({ error: 'Registration run not found' });
+      return;
+    }
+
+    const terminalStatuses = new Set(['completed', 'failed', 'throttled', 'canceled']);
+    if (terminalStatuses.has(run.status)) {
+      res.json({ ok: true, runId: run.id, status: run.status, terminal: true });
+      return;
+    }
+
+    if (run.status === 'queued') {
+      await prisma.registrationRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'canceled',
+          phase: 'canceled',
+          stopRequestedAt: new Date(),
+          finishedAt: new Date()
+        }
+      });
+    } else {
+      await prisma.registrationRun.update({
+        where: { id: run.id },
+        data: {
+          stopRequestedAt: new Date()
+        }
+      });
+    }
+
+    const controller = registrationRunControllers.get(run.id);
+    if (controller) {
+      controller.abort();
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'registration.run.cancel',
+        outcome: 'success',
+        resourceType: 'registration_run',
+        resourceId: run.id,
+        ip,
+        userAgent,
+        detailsJson: { previousStatus: run.status }
+      }
+    }).catch(() => {});
+
+    const updated = await prisma.registrationRun.findUnique({ where: { id: run.id } });
+    res.json({
+      ok: true,
+      runId: run.id,
+      status: updated?.status ?? run.status
+    });
+  }));
+
+  app.get(p('/registration/status-codes'), requireAdmin, asyncHandler(async (req, res) => {
+    const limitRaw = Number.parseInt(req.query.limit as string, 10);
+    const limit = Math.min(Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50, 200);
+    const runs = await prisma.registrationRun.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        status: true,
+        statusCodeSummaryJson: true,
+        createdAt: true
+      }
+    });
+
+    const aggregate: Record<string, number> = {};
+    for (const run of runs) {
+      const summary = parseStatusCodeSummary(run.statusCodeSummaryJson);
+      for (const [statusCode, count] of Object.entries(summary)) {
+        aggregate[statusCode] = (aggregate[statusCode] ?? 0) + count;
+      }
+    }
+
+    res.json({
+      totalRuns: runs.length,
+      statusCodes: aggregate,
+      runs: runs.map((run) => ({
+        id: run.id,
+        status: run.status,
+        createdAt: run.createdAt.toISOString(),
+        statusCodes: parseStatusCodeSummary(run.statusCodeSummaryJson)
+      }))
+    });
+  }));
+
+  app.post(p('/registration/runs/:id/import'), requireAdmin, asyncHandler(async (req, res) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? null;
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    if (!registrationImportLimiter.tryAcquire(ip ?? 'unknown')) {
+      res.status(429).json({ error: 'Rate limit exceeded', retryAfterMs: 60_000 });
+      return;
+    }
+
+    const run = await prisma.registrationRun.findUnique({ where: { id: req.params.id } });
+    if (!run) {
+      res.status(404).json({ error: 'Registration run not found' });
+      return;
+    }
+
+    const candidates = parseRegistrationCandidates(run.resultJson);
+    if (candidates.length === 0) {
+      res.status(400).json({ error: 'No importable candidates in this run' });
+      return;
+    }
+
+    const body = req.body ?? {};
+    const maxItemsRaw = Number.parseInt(String(body.maxItems ?? ''), 10);
+    const maxItems = Number.isFinite(maxItemsRaw) && maxItemsRaw > 0 ? maxItemsRaw : candidates.length;
+    const labelPrefix = typeof body.labelPrefix === 'string' && body.labelPrefix.trim()
+      ? body.labelPrefix.trim()
+      : null;
+    const selectedEmails = Array.isArray(body.emails)
+      ? new Set(body.emails.filter((item: unknown): item is string => typeof item === 'string').map((item: string) => item.trim().toLowerCase()))
+      : null;
+
+    const summary = {
+      total: 0,
+      imported: 0,
+      failed: 0,
+      renamed: 0,
+      skipped: 0
+    };
+    const renamed: Array<{ from: string; to: string }> = [];
+    const skipped: Array<{ label: string; reason: string }> = [];
+    const errors: Array<{ index: number; label: string; error: string }> = [];
+
+    const existingRows = await prisma.tavilyKey.findMany({ select: { id: true, keyEncrypted: true } });
+    const existingApiKeys = new Set<string>();
+    for (const row of existingRows) {
+      try {
+        existingApiKeys.add(decryptAes256Gcm(Buffer.from(row.keyEncrypted), encryptionKey));
+      } catch {
+        // Ignore rows that fail decryption; keep import flow available.
+      }
+    }
+
+    let processed = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      if (processed >= maxItems) break;
+      const candidate = candidates[i];
+      if (selectedEmails && candidate.email && !selectedEmails.has(candidate.email.toLowerCase())) {
+        continue;
+      }
+      processed++;
+      summary.total++;
+
+      const labelToUse = labelPrefix
+        ? `${labelPrefix}-${String(summary.total).padStart(3, '0')}`
+        : candidate.label;
+
+      try {
+        const encryptedBytes = Buffer.from(candidate.keyEncryptedB64, 'base64');
+        const apiKey = decryptAes256Gcm(encryptedBytes, encryptionKey);
+        if (existingApiKeys.has(apiKey)) {
+          summary.skipped++;
+          skipped.push({ label: labelToUse, reason: 'API key already exists' });
+          continue;
+        }
+
+        const result = await createTavilyKeyWithAutoRename({
+          label: labelToUse,
+          keyEncrypted: Uint8Array.from(encryptedBytes),
+          keyMasked: candidate.maskedKey,
+          status: 'active'
+        });
+        existingApiKeys.add(apiKey);
+        summary.imported++;
+
+        if (result.renamedFrom) {
+          summary.renamed++;
+          renamed.push({ from: result.renamedFrom, to: result.labelUsed });
+        }
+      } catch (err: any) {
+        summary.failed++;
+        errors.push({
+          index: i,
+          label: labelToUse,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+
+    await prisma.registrationRun.update({
+      where: { id: run.id },
+      data: {
+        importedCandidates: { increment: summary.imported }
+      }
+    }).catch(() => {});
+
+    const outcome = summary.failed > 0 ? 'partial' : 'success';
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'registration.run.import',
+        outcome,
+        resourceType: 'registration_run',
+        resourceId: run.id,
+        ip,
+        userAgent,
+        detailsJson: {
+          imported: summary.imported,
+          failed: summary.failed,
+          skipped: summary.skipped,
+          renamed: summary.renamed
+        }
+      }
+    }).catch(() => {});
+
+    res.json({
+      ok: true,
+      runId: run.id,
+      summary,
+      renamed,
+      skipped,
+      errors
     });
   }));
 

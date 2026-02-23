@@ -1,8 +1,8 @@
 import http from 'node:http';
 
-import { createBridgeApp } from './app.js';
+import { createBridgeApp, resolveBridgeHost } from './app.js';
 
-const HOST = process.env.HOST ?? '0.0.0.0';
+const HOST = resolveBridgeHost();
 const PORT = Number(process.env.PORT ?? '8787');
 const app = createBridgeApp({ host: HOST });
 

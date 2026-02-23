@@ -14,6 +14,8 @@
     "dev:admin-ui": "npm --workspace @mcp-nexus/admin-ui run dev",
     "dev:landing-page": "npm --workspace @mcp-nexus/landing-page run dev",
     "typecheck": "npm --workspaces run typecheck --if-present",
+    "preflight:types": "node scripts/preflightRuntimeTyping.mjs",
+    "preflight:release": "npm run preflight:types && npm run build",
     "test": "npm run build && npm --workspaces run test --if-present"
   },
   "dependencies": {

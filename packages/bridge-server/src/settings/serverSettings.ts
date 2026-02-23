@@ -10,6 +10,7 @@ const KEY_GROK_MODEL_DEFAULT = 'grokModelDefault';
 const KEY_GROK_EXTRA_SOURCES_DEFAULT = 'grokExtraSourcesDefault';
 const KEY_GROK_SOURCE_MODE = 'grokSearchSourceMode';
 const KEY_GROK_STRATEGY = 'grokKeySelectionStrategy';
+const KEY_REGISTRATION_AUTOMATION_ENABLED = 'registrationAutomationEnabled';
 
 function clampExtraSources(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -26,6 +27,7 @@ export class ServerSettings {
   private readonly fallbackGrokExtraSourcesDefault: number;
   private readonly fallbackGrokSearchSourceMode: SearchSourceMode;
   private readonly fallbackGrokStrategy: TavilyKeySelectionStrategy;
+  private readonly fallbackRegistrationAutomationEnabled: boolean;
   private cached: { strategy: TavilyKeySelectionStrategy; expiresAtMs: number } | null = null;
   private cachedSearchSourceMode: { mode: SearchSourceMode; expiresAtMs: number } | null = null;
   private cachedResearchEnabled: { enabled: boolean; expiresAtMs: number } | null = null;
@@ -34,6 +36,7 @@ export class ServerSettings {
   private cachedGrokExtraSourcesDefault: { value: number; expiresAtMs: number } | null = null;
   private cachedGrokSourceMode: { mode: SearchSourceMode; expiresAtMs: number } | null = null;
   private cachedGrokStrategy: { strategy: TavilyKeySelectionStrategy; expiresAtMs: number } | null = null;
+  private cachedRegistrationAutomationEnabled: { enabled: boolean; expiresAtMs: number } | null = null;
   private inFlight: Promise<TavilyKeySelectionStrategy> | null = null;
   private inFlightSearchSourceMode: Promise<SearchSourceMode> | null = null;
   private inFlightResearchEnabled: Promise<boolean> | null = null;
@@ -42,6 +45,7 @@ export class ServerSettings {
   private inFlightGrokExtraSourcesDefault: Promise<number> | null = null;
   private inFlightGrokSourceMode: Promise<SearchSourceMode> | null = null;
   private inFlightGrokStrategy: Promise<TavilyKeySelectionStrategy> | null = null;
+  private inFlightRegistrationAutomationEnabled: Promise<boolean> | null = null;
 
   constructor(opts: {
     prisma: PrismaClient;
@@ -53,6 +57,7 @@ export class ServerSettings {
     fallbackGrokExtraSourcesDefault?: number;
     fallbackGrokSearchSourceMode?: SearchSourceMode;
     fallbackGrokStrategy?: TavilyKeySelectionStrategy;
+    fallbackRegistrationAutomationEnabled?: boolean;
   }) {
     this.prisma = opts.prisma;
     this.fallbackStrategy = opts.fallbackStrategy;
@@ -66,6 +71,8 @@ export class ServerSettings {
     this.fallbackGrokSearchSourceMode =
       opts.fallbackGrokSearchSourceMode ?? parseSearchSourceMode(process.env.GROK_SEARCH_SOURCE_MODE, 'combined');
     this.fallbackGrokStrategy = opts.fallbackGrokStrategy ?? opts.fallbackStrategy;
+    this.fallbackRegistrationAutomationEnabled =
+      opts.fallbackRegistrationAutomationEnabled ?? (process.env.REGISTRATION_AUTOMATION_ENABLED === 'true');
   }
 
   async getTavilyKeySelectionStrategy(): Promise<TavilyKeySelectionStrategy> {
@@ -168,6 +175,45 @@ export class ServerSettings {
       update: { value: String(next) }
     });
     this.cachedResearchEnabled = { enabled: next, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+    return next;
+  }
+
+  async getRegistrationAutomationEnabled(): Promise<boolean> {
+    const now = Date.now();
+    if (this.cachedRegistrationAutomationEnabled && now < this.cachedRegistrationAutomationEnabled.expiresAtMs) {
+      return this.cachedRegistrationAutomationEnabled.enabled;
+    }
+    if (this.inFlightRegistrationAutomationEnabled) return this.inFlightRegistrationAutomationEnabled;
+
+    this.inFlightRegistrationAutomationEnabled = (async () => {
+      try {
+        const row = await this.prisma.serverSetting.findUnique({ where: { key: KEY_REGISTRATION_AUTOMATION_ENABLED } });
+        const enabled = row?.value === 'true'
+          ? true
+          : row?.value === 'false'
+            ? false
+            : this.fallbackRegistrationAutomationEnabled;
+        this.cachedRegistrationAutomationEnabled = { enabled, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        return enabled;
+      } catch {
+        const fallback = this.cachedRegistrationAutomationEnabled?.enabled ?? this.fallbackRegistrationAutomationEnabled;
+        this.cachedRegistrationAutomationEnabled = { enabled: fallback, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        return fallback;
+      } finally {
+        this.inFlightRegistrationAutomationEnabled = null;
+      }
+    })();
+
+    return this.inFlightRegistrationAutomationEnabled;
+  }
+
+  async setRegistrationAutomationEnabled(next: boolean): Promise<boolean> {
+    await this.prisma.serverSetting.upsert({
+      where: { key: KEY_REGISTRATION_AUTOMATION_ENABLED },
+      create: { key: KEY_REGISTRATION_AUTOMATION_ENABLED, value: String(next) },
+      update: { value: String(next) }
+    });
+    this.cachedRegistrationAutomationEnabled = { enabled: next, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
     return next;
   }
 
