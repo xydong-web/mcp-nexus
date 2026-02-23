@@ -2,7 +2,7 @@ import http from 'node:http';
 
 import { createBridgeApp } from './app.js';
 
-const HOST = process.env.HOST ?? '127.0.0.1';
+const HOST = process.env.HOST ?? '0.0.0.0';
 const PORT = Number(process.env.PORT ?? '8787');
 const app = createBridgeApp({ host: HOST });
 

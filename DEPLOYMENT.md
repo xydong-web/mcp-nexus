@@ -38,11 +38,17 @@ Before deploying, complete the [Production Checklist](../../PRODUCTION_CHECKLIST
 git clone https://github.com/ykq007/mcp-nexus.git
 cd mcp-nexus
 
-# Install dependencies
-npm install
+# Install dependencies (include build-time toolchain/types)
+npm ci --include=dev
 
 # Build all packages
 npm run build
+```
+
+Cloud platforms that default to production-only installs (for example, `--omit=dev`) can fail TypeScript/Vite builds. For Zeabur-like environments, set the build command to:
+
+```bash
+npm run build:cloud
 ```
 
 ### Step 2: Configure Environment
@@ -370,8 +376,8 @@ wrangler d1 export mcp-nexus-db --remote --output=backup.sql
 # Pull latest code
 git pull origin main
 
-# Install dependencies
-npm install
+# Install dependencies (include build-time toolchain/types)
+npm ci --include=dev
 
 # Build
 npm run build
@@ -395,6 +401,14 @@ sudo systemctl restart mcp-nexus
 2. Verify environment variables: `./scripts/verify-production-config.sh`
 3. Check database: `sqlite3 production.db ".tables"`
 4. Verify port is not in use: `lsof -i :8787`
+
+### TypeScript build errors (missing `process`, `node:*`, `console`, or `fetch`)
+
+If cloud build logs show errors like `TS2580` / `TS2307`, the install step likely omitted build-time dependencies.
+
+1. Use `npm ci --include=dev` (or `npm run build:cloud`) in the build pipeline.
+2. Avoid `npm ci --omit=dev` for source-compilation deployments.
+3. Re-run `npm run build` after dependency install succeeds.
 
 ### "No API keys configured"
 

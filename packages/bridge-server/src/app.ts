@@ -72,7 +72,7 @@ function getPrisma(): PrismaClient {
 }
 
 export function createBridgeApp(options: CreateBridgeAppOptions = {}): express.Express {
-  const host = options.host ?? process.env.HOST ?? '127.0.0.1';
+  const host = options.host ?? process.env.HOST ?? '0.0.0.0';
 
   const app = createMcpExpressApp({ host });
   app.set('trust proxy', true);
