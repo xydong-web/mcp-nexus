@@ -178,7 +178,7 @@ function buildServerInfo(
     settingsMap.grokSearchEnabled,
     parseBooleanSetting(c.env.GROK_SEARCH_ENABLED, false)
   );
-  const grokModelDefault = (settingsMap.grokModelDefault ?? c.env.GROK_MODEL_DEFAULT ?? 'grok-4-latest').trim() || 'grok-4-latest';
+  const grokModelDefault = (settingsMap.grokModelDefault ?? c.env.GROK_MODEL_DEFAULT ?? 'grok-4.2-beta').trim() || 'grok-4.2-beta';
   const grokExtraSourcesDefault = parseBoundedInt(
     settingsMap.grokExtraSourcesDefault ?? c.env.GROK_EXTRA_SOURCES_DEFAULT,
     0,

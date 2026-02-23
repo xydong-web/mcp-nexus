@@ -255,7 +255,8 @@ async function requestGrokSearch(opts: {
       body: JSON.stringify({
         model: opts.model,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2
+        temperature: 0.2,
+        stream: false
       }),
       signal: controller.signal
     });

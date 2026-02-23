@@ -21,6 +21,19 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function normalizeProviderBaseUrl(raw: string | null | undefined, fallback: string): string {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) return fallback;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return fallback;
+    parsed.hash = '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return fallback;
+  }
+}
+
 function toCanonicalUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -168,6 +181,8 @@ export class RotatingGrokClient implements GrokSearchClient {
   private readonly maxRetries: number;
   private readonly fixedCooldownMs: number;
   private readonly baseUrl: string;
+  private readonly fallbackApiKey: string | null;
+  private readonly getProviderConfig: (() => Promise<{ baseUrl: string; apiKey: string | null; source?: string }>) | undefined;
   private readonly timeoutMs: number;
   private readonly sessionCache: GrokSessionCache;
 
@@ -180,6 +195,7 @@ export class RotatingGrokClient implements GrokSearchClient {
     fixedCooldownMs?: number;
     timeoutMs?: number;
     baseUrl?: string;
+    getProviderConfig?: () => Promise<{ baseUrl: string; apiKey: string | null; source?: string }>;
     sessionCache?: GrokSessionCache;
   }) {
     this.pool = opts.pool;
@@ -189,7 +205,9 @@ export class RotatingGrokClient implements GrokSearchClient {
     this.maxRetries = clamp(opts.maxRetries ?? Number(process.env.GROK_MAX_RETRIES ?? '2'), 0, 6);
     this.fixedCooldownMs = Math.max(1000, opts.fixedCooldownMs ?? Number(process.env.GROK_COOLDOWN_MS ?? String(60_000)));
     this.timeoutMs = Math.max(1000, opts.timeoutMs ?? Number(process.env.GROK_HTTP_TIMEOUT_MS ?? '20000'));
-    this.baseUrl = (opts.baseUrl ?? process.env.GROK_API_URL ?? DEFAULT_GROK_API_URL).replace(/\/+$/, '');
+    this.baseUrl = normalizeProviderBaseUrl(opts.baseUrl ?? process.env.GROK_API_URL ?? DEFAULT_GROK_API_URL, DEFAULT_GROK_API_URL);
+    this.fallbackApiKey = (process.env.GROK_API_KEY ?? '').trim() || null;
+    this.getProviderConfig = opts.getProviderConfig;
     this.sessionCache = opts.sessionCache ?? new GrokSessionCache();
   }
 
@@ -205,7 +223,7 @@ export class RotatingGrokClient implements GrokSearchClient {
     const sourceMode = opts?.sourceMode ?? 'combined';
     const model = typeof params.model === 'string' && params.model.trim()
       ? params.model.trim()
-      : (opts?.modelDefault ?? process.env.GROK_MODEL_DEFAULT ?? 'grok-4-latest');
+      : (opts?.modelDefault ?? process.env.GROK_MODEL_DEFAULT ?? 'grok-4.2-beta');
     const platform = typeof params.platform === 'string' && params.platform.trim() ? params.platform.trim() : undefined;
     const maxResults = typeof params.max_results === 'number' ? clamp(params.max_results, 1, 50) : undefined;
     const defaultExtra = clamp(opts?.extraSourcesDefault ?? Number(process.env.GROK_EXTRA_SOURCES_DEFAULT ?? '0'), 0, 20);
@@ -366,13 +384,92 @@ export class RotatingGrokClient implements GrokSearchClient {
   }
 
   async preflightEligible(): Promise<{ ok: true } | { ok: false; retryAfterMs?: number; error: string }> {
+    const provider = await this.resolveProviderConfig();
+    if (provider.apiKey) {
+      return { ok: true };
+    }
     return await this.pool.preflightEligible();
+  }
+
+  private async resolveProviderConfig(): Promise<{ baseUrl: string; apiKey: string | null; source: 'database' | 'env' | 'none' }> {
+    const fallbackBaseUrl = this.baseUrl;
+    const fallbackApiKey = this.fallbackApiKey;
+    if (!this.getProviderConfig) {
+      return {
+        baseUrl: fallbackBaseUrl,
+        apiKey: fallbackApiKey,
+        source: fallbackApiKey ? 'env' : 'none'
+      };
+    }
+
+    try {
+      const resolved = await this.getProviderConfig();
+      const baseUrl = normalizeProviderBaseUrl(resolved?.baseUrl, fallbackBaseUrl);
+      const resolvedApiKey = typeof resolved?.apiKey === 'string' ? resolved.apiKey.trim() : '';
+      if (resolvedApiKey) {
+        const source = resolved?.source === 'env' ? 'env' : 'database';
+        return { baseUrl, apiKey: resolvedApiKey, source };
+      }
+      if (fallbackApiKey) {
+        return { baseUrl, apiKey: fallbackApiKey, source: 'env' };
+      }
+      return { baseUrl, apiKey: null, source: 'none' };
+    } catch {
+      return {
+        baseUrl: fallbackBaseUrl,
+        apiKey: fallbackApiKey,
+        source: fallbackApiKey ? 'env' : 'none'
+      };
+    }
   }
 
   private async withRotation<T>(
     meta: { toolName: string; query?: string; argsSummary?: Record<string, unknown> },
     fn: (client: ReturnType<typeof createGrokHttpClient>) => Promise<T>
   ): Promise<{ result: T; upstreamKeyId: string }> {
+    const providerConfig = await this.resolveProviderConfig();
+
+    if (providerConfig.apiKey) {
+      const providerClient = createGrokHttpClient({
+        apiKey: providerConfig.apiKey,
+        baseUrl: providerConfig.baseUrl,
+        timeoutMs: this.timeoutMs
+      });
+
+      const providerStartedAt = Date.now();
+      try {
+        const result = await fn(providerClient);
+        await logGrokToolUsage(this.prisma, {
+          toolName: meta.toolName,
+          upstreamKeyId: null,
+          outcome: 'success',
+          latencyMs: Date.now() - providerStartedAt,
+          query: meta.query,
+          argsSummary: {
+            ...(meta.argsSummary ?? {}),
+            keyMode: 'provider',
+            providerSource: providerConfig.source
+          }
+        }).catch(() => {});
+        return { result, upstreamKeyId: 'provider' };
+      } catch (providerError: unknown) {
+        await logGrokToolUsage(this.prisma, {
+          toolName: meta.toolName,
+          upstreamKeyId: null,
+          outcome: 'error',
+          latencyMs: Date.now() - providerStartedAt,
+          query: meta.query,
+          argsSummary: {
+            ...(meta.argsSummary ?? {}),
+            keyMode: 'provider',
+            providerSource: providerConfig.source,
+            fallbackToPool: true
+          },
+          errorMessage: providerError instanceof Error ? providerError.message : String(providerError)
+        }).catch(() => {});
+      }
+    }
+
     let attempt = 0;
     let lastError: unknown = null;
     let lastKeyId: string | null = null;
@@ -396,7 +493,7 @@ export class RotatingGrokClient implements GrokSearchClient {
       lastKeyId = key.id;
       const client = createGrokHttpClient({
         apiKey: key.apiKey,
-        baseUrl: this.baseUrl,
+        baseUrl: providerConfig.baseUrl,
         timeoutMs: this.timeoutMs
       });
 
@@ -538,4 +635,3 @@ export class RotatingGrokClient implements GrokSearchClient {
     }
   }
 }
-

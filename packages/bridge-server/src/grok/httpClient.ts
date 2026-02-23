@@ -135,7 +135,8 @@ export function createGrokHttpClient(opts: { apiKey: string; baseUrl: string; ti
       const body = await request('/chat/completions', {
         model: params.model,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2
+        temperature: 0.2,
+        stream: false
       });
 
       return {
@@ -146,4 +147,3 @@ export function createGrokHttpClient(opts: { apiKey: string; baseUrl: string; ti
     }
   };
 }
-

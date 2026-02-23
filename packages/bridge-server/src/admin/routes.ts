@@ -137,6 +137,7 @@ export function registerAdminRoutes(
     const grokExtraSourcesDefault = await opts.serverSettings.getGrokExtraSourcesDefault();
     const grokSearchSourceMode = await opts.serverSettings.getGrokSearchSourceMode();
     const grokKeySelectionStrategy = await opts.serverSettings.getGrokKeySelectionStrategy();
+    const grokProvider = await opts.serverSettings.getGrokProviderPublicConfig();
     const braveKeyCount = await prisma.braveKey.count({ where: { status: 'active' } });
     const grokKeyCount = await prisma.grokKey.count({ where: { status: 'active' } });
     res.json({
@@ -150,11 +151,17 @@ export function registerAdminRoutes(
       grokExtraSourcesDefault,
       grokSearchSourceMode,
       grokKeySelectionStrategy,
-      grokActiveKeyCount: grokKeyCount
+      grokActiveKeyCount: grokKeyCount,
+      grokProviderBaseUrl: grokProvider.baseUrl,
+      grokProviderApiKeyConfigured: grokProvider.apiKeyConfigured,
+      grokProviderApiKeyMasked: grokProvider.apiKeyMasked,
+      grokProviderSource: grokProvider.source
     });
   }));
 
   app.patch(p('/server-info'), requireAdmin, asyncHandler(async (req, res) => {
+    const ip = typeof req.ip === 'string' ? req.ip : null;
+    const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null;
     const {
       tavilyKeySelectionStrategy,
       searchSourceMode,
@@ -164,8 +171,17 @@ export function registerAdminRoutes(
       grokModelDefault,
       grokExtraSourcesDefault,
       grokSearchSourceMode,
-      grokKeySelectionStrategy
+      grokKeySelectionStrategy,
+      grokProviderBaseUrl,
+      grokProviderApiKey,
+      grokProviderClearApiKey
     } = req.body ?? {};
+    let providerConfigUpdated = false;
+    const providerUpdateDetails: Record<string, unknown> = {};
+    if (grokProviderApiKey !== undefined && grokProviderClearApiKey === true) {
+      res.status(400).json({ error: 'grokProviderApiKey and grokProviderClearApiKey=true cannot be used together' });
+      return;
+    }
 
     // Validate tavilyKeySelectionStrategy if provided
     if (tavilyKeySelectionStrategy !== undefined) {
@@ -247,6 +263,58 @@ export function registerAdminRoutes(
       await opts.serverSettings.setGrokKeySelectionStrategy(grokKeySelectionStrategy as TavilyKeySelectionStrategy);
     }
 
+    if (grokProviderBaseUrl !== undefined) {
+      if (typeof grokProviderBaseUrl !== 'string') {
+        res.status(400).json({ error: 'grokProviderBaseUrl must be a string' });
+        return;
+      }
+      try {
+        const normalized = await opts.serverSettings.setGrokProviderBaseUrl(grokProviderBaseUrl);
+        providerConfigUpdated = true;
+        providerUpdateDetails.baseUrl = normalized;
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid grokProviderBaseUrl' });
+        return;
+      }
+    }
+
+    if (grokProviderApiKey !== undefined) {
+      if (typeof grokProviderApiKey !== 'string' || !grokProviderApiKey.trim()) {
+        res.status(400).json({ error: 'grokProviderApiKey must be a non-empty string' });
+        return;
+      }
+      const updated = await opts.serverSettings.setGrokProviderApiKey(grokProviderApiKey.trim());
+      providerConfigUpdated = true;
+      providerUpdateDetails.apiKeyConfigured = updated.configured;
+      providerUpdateDetails.apiKeyMasked = updated.maskedKey;
+    }
+
+    if (grokProviderClearApiKey !== undefined) {
+      if (typeof grokProviderClearApiKey !== 'boolean') {
+        res.status(400).json({ error: 'grokProviderClearApiKey must be a boolean' });
+        return;
+      }
+      if (grokProviderClearApiKey) {
+        await opts.serverSettings.clearGrokProviderApiKey();
+        providerConfigUpdated = true;
+        providerUpdateDetails.apiKeyConfigured = false;
+      }
+    }
+
+    if (providerConfigUpdated) {
+      await prisma.auditLog.create({
+        data: {
+          eventType: 'grok_provider.update',
+          outcome: 'success',
+          resourceType: 'server_setting',
+          resourceId: 'grok_provider',
+          ip,
+          userAgent,
+          detailsJson: providerUpdateDetails as any
+        }
+      }).catch(() => {});
+    }
+
     // Return updated values
     const updatedStrategy = await opts.serverSettings.getTavilyKeySelectionStrategy();
     const updatedMode = await opts.serverSettings.getSearchSourceMode();
@@ -257,6 +325,7 @@ export function registerAdminRoutes(
     const updatedGrokExtraSourcesDefault = await opts.serverSettings.getGrokExtraSourcesDefault();
     const updatedGrokSearchSourceMode = await opts.serverSettings.getGrokSearchSourceMode();
     const updatedGrokKeySelectionStrategy = await opts.serverSettings.getGrokKeySelectionStrategy();
+    const updatedGrokProvider = await opts.serverSettings.getGrokProviderPublicConfig();
     const braveKeyCount = await prisma.braveKey.count({ where: { status: 'active' } });
     const grokKeyCount = await prisma.grokKey.count({ where: { status: 'active' } });
 
@@ -273,7 +342,115 @@ export function registerAdminRoutes(
       grokExtraSourcesDefault: updatedGrokExtraSourcesDefault,
       grokSearchSourceMode: updatedGrokSearchSourceMode,
       grokKeySelectionStrategy: updatedGrokKeySelectionStrategy,
-      grokActiveKeyCount: grokKeyCount
+      grokActiveKeyCount: grokKeyCount,
+      grokProviderBaseUrl: updatedGrokProvider.baseUrl,
+      grokProviderApiKeyConfigured: updatedGrokProvider.apiKeyConfigured,
+      grokProviderApiKeyMasked: updatedGrokProvider.apiKeyMasked,
+      grokProviderSource: updatedGrokProvider.source
+    });
+  }));
+
+  app.get(p('/grok-provider'), requireAdmin, asyncHandler(async (_req, res) => {
+    const provider = await opts.serverSettings.getGrokProviderPublicConfig();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      baseUrl: provider.baseUrl,
+      apiKeyConfigured: provider.apiKeyConfigured,
+      apiKeyMasked: provider.apiKeyMasked,
+      source: provider.source
+    });
+  }));
+
+  app.patch(p('/grok-provider'), requireAdmin, asyncHandler(async (req, res) => {
+    const ip = typeof req.ip === 'string' ? req.ip : null;
+    const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null;
+    const body = req.body ?? {};
+    const baseUrl = body.baseUrl;
+    const apiKey = body.apiKey;
+    const clearApiKey = body.clearApiKey;
+
+    const hasBaseUrl = baseUrl !== undefined;
+    const hasApiKey = apiKey !== undefined;
+    const hasClearApiKey = clearApiKey !== undefined;
+    if (!hasBaseUrl && !hasApiKey && !hasClearApiKey) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: 'At least one of baseUrl, apiKey, clearApiKey is required' });
+      return;
+    }
+
+    if (hasBaseUrl && typeof baseUrl !== 'string') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: 'baseUrl must be a string' });
+      return;
+    }
+    if (hasApiKey && (typeof apiKey !== 'string' || !apiKey.trim())) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: 'apiKey must be a non-empty string' });
+      return;
+    }
+    if (hasClearApiKey && typeof clearApiKey !== 'boolean') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: 'clearApiKey must be a boolean' });
+      return;
+    }
+    if (hasApiKey && clearApiKey === true) {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: 'apiKey and clearApiKey=true cannot be used together' });
+      return;
+    }
+
+    const details: Record<string, unknown> = {};
+    try {
+      if (hasBaseUrl) {
+        const normalized = await opts.serverSettings.setGrokProviderBaseUrl(baseUrl as string);
+        details.baseUrl = normalized;
+      }
+      if (hasApiKey) {
+        const result = await opts.serverSettings.setGrokProviderApiKey((apiKey as string).trim());
+        details.apiKeyConfigured = result.configured;
+        details.apiKeyMasked = result.maskedKey;
+      }
+      if (clearApiKey === true) {
+        await opts.serverSettings.clearGrokProviderApiKey();
+        details.apiKeyConfigured = false;
+      }
+    } catch (err) {
+      await prisma.auditLog.create({
+        data: {
+          eventType: 'grok_provider.update',
+          outcome: 'validation_error',
+          resourceType: 'server_setting',
+          resourceId: 'grok_provider',
+          ip,
+          userAgent,
+          detailsJson: { error: err instanceof Error ? err.message : String(err) } as any
+        }
+      }).catch(() => {});
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid Grok provider settings' });
+      return;
+    }
+
+    const provider = await opts.serverSettings.getGrokProviderPublicConfig();
+    await prisma.auditLog.create({
+      data: {
+        eventType: 'grok_provider.update',
+        outcome: 'success',
+        resourceType: 'server_setting',
+        resourceId: 'grok_provider',
+        ip,
+        userAgent,
+        detailsJson: details as any
+      }
+    }).catch(() => {});
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      baseUrl: provider.baseUrl,
+      apiKeyConfigured: provider.apiKeyConfigured,
+      apiKeyMasked: provider.apiKeyMasked,
+      source: provider.source
     });
   }));
 

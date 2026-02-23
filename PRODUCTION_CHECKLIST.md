@@ -5,7 +5,7 @@
 ### ✅ Phase 1: Environment Configuration
 
 #### Node.js Server (.env)
-- [ ] `DATABASE_URL` - Set to production database path
+- [ ] `DATABASE_URL` - Set to PostgreSQL connection string (`postgresql://...`)
 - [ ] `KEY_ENCRYPTION_SECRET` - Generate new secure key (32 bytes, base64)
   ```bash
   openssl rand -base64 32
@@ -36,15 +36,21 @@
 
 #### Node.js (Prisma)
 ```bash
-cd packages/db
-DATABASE_URL="file:./production.db" npx prisma migrate deploy
+DATABASE_URL="postgresql://mcp_nexus:CHANGE_ME@db.example.com:5432/mcp_nexus?schema=public" \
+  npm run db:bootstrap
 ```
 
-Verify migrations applied:
-- [ ] `20260202124042_init`
-- [ ] `20260202154903_add_brave_keys`
-- [ ] `20260203110006_add_brave_tool_usage`
-- [ ] `20260209080847_add_token_scoping_and_rate_limit`
+Verify tables exist:
+- [ ] `TavilyKey`
+- [ ] `BraveKey`
+- [ ] `GrokKey`
+- [ ] `ClientToken`
+- [ ] `TavilyToolUsage`
+- [ ] `BraveToolUsage`
+- [ ] `GrokToolUsage`
+- [ ] `AuditLog`
+- [ ] `ServerSetting`
+- [ ] `RegistrationRun`
 
 #### Cloudflare Worker (D1)
 ```bash
@@ -78,7 +84,8 @@ Verify tables exist:
 - [ ] CORS is properly configured (if needed)
 
 #### Database Security
-- [ ] Database file permissions are restricted (Node.js)
+- [ ] PostgreSQL user permissions follow least privilege
+- [ ] PostgreSQL network access is restricted to trusted CIDRs
 - [ ] D1 database is not publicly accessible (Worker)
 - [ ] Audit logging is enabled
 - [ ] Sensitive data is encrypted
@@ -254,8 +261,8 @@ If issues are detected:
 
 2. **Database**: Restore from backup if needed
    ```bash
-   # Node.js
-   cp backup.db production.db
+   # Node.js (PostgreSQL)
+   pg_restore --clean --if-exists --dbname "$DATABASE_URL" backup.dump
 
    # Cloudflare Worker
    # Contact Cloudflare support for D1 restoration

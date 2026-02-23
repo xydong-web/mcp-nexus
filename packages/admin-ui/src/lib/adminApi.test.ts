@@ -73,7 +73,7 @@ describe('adminApi', () => {
 
     await api.updateServerInfo({
       grokSearchEnabled: true,
-      grokModelDefault: 'grok-4-latest',
+      grokModelDefault: 'grok-4.2-beta',
       grokExtraSourcesDefault: 6,
       grokSearchSourceMode: 'combined',
       grokKeySelectionStrategy: 'random'
@@ -85,7 +85,7 @@ describe('adminApi', () => {
     expect(init.method).toBe('PATCH');
     expect(JSON.parse(init.body)).toEqual({
       grokSearchEnabled: true,
-      grokModelDefault: 'grok-4-latest',
+      grokModelDefault: 'grok-4.2-beta',
       grokExtraSourcesDefault: 6,
       grokSearchSourceMode: 'combined',
       grokKeySelectionStrategy: 'random'
@@ -203,6 +203,53 @@ describe('adminApi', () => {
     const [deleteUrl, deleteInit] = fetchImpl.mock.calls[4] as any[];
     expect(deleteUrl).toBe('/admin/api/grok-keys/grok_1');
     expect(deleteInit.method).toBe('DELETE');
+  });
+
+  it('calls Grok provider config endpoints with expected payloads', async () => {
+    const fetchImpl = vi.fn();
+    fetchImpl.mockImplementationOnce(async () => jsonResponse(200, {
+      baseUrl: 'https://api.x.ai/v1',
+      apiKeyConfigured: true,
+      apiKeyMasked: 'xai-12...abcd',
+      source: 'database'
+    }));
+    fetchImpl.mockImplementationOnce(async () => jsonResponse(200, {
+      ok: true,
+      baseUrl: 'https://api.x.ai/v1',
+      apiKeyConfigured: true,
+      apiKeyMasked: 'xai-34...efgh',
+      source: 'database'
+    }));
+
+    const api = createAdminApi({ baseUrl: '', adminToken: 't0k' }, { fetchImpl: fetchImpl as any });
+
+    const current = await api.getGrokProviderConfig();
+    expect(current).toMatchObject({
+      baseUrl: 'https://api.x.ai/v1',
+      apiKeyConfigured: true
+    });
+
+    const updated = await api.updateGrokProviderConfig({
+      baseUrl: 'https://api.x.ai/v1',
+      apiKey: 'xai-secret'
+    });
+    expect(updated).toMatchObject({
+      ok: true,
+      apiKeyConfigured: true
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [getUrl, getInit] = fetchImpl.mock.calls[0] as any[];
+    expect(getUrl).toBe('/admin/api/grok-provider');
+    expect(getInit.method).toBe('GET');
+
+    const [patchUrl, patchInit] = fetchImpl.mock.calls[1] as any[];
+    expect(patchUrl).toBe('/admin/api/grok-provider');
+    expect(patchInit.method).toBe('PATCH');
+    expect(JSON.parse(patchInit.body)).toEqual({
+      baseUrl: 'https://api.x.ai/v1',
+      apiKey: 'xai-secret'
+    });
   });
 
   it('reveals a token by id', async () => {

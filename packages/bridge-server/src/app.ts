@@ -176,7 +176,8 @@ export function createBridgeApp(options: CreateBridgeAppOptions = {}): express.E
   const serverSettings = new ServerSettings({
     prisma,
     fallbackStrategy: FALLBACK_TAVILY_KEY_SELECTION_STRATEGY,
-    fallbackSearchSourceMode: FALLBACK_SEARCH_SOURCE_MODE
+    fallbackSearchSourceMode: FALLBACK_SEARCH_SOURCE_MODE,
+    encryptionKey
   });
   const pool = new TavilyKeyPool({
     prisma,
@@ -211,6 +212,7 @@ export function createBridgeApp(options: CreateBridgeAppOptions = {}): express.E
     prisma,
     tavilyClient,
     braveClient,
+    getProviderConfig: () => serverSettings.getGrokProviderRuntimeConfig(),
     maxRetries: MAX_RETRIES,
     fixedCooldownMs: FIXED_COOLDOWN_MS
   });

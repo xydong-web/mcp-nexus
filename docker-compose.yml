@@ -1,4 +1,18 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mcp_nexus
+      POSTGRES_USER: mcp_nexus
+      POSTGRES_PASSWORD: mcp_nexus_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_nexus -d mcp_nexus"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mcp_nexus_postgres:/var/lib/postgresql/data
+
   bridge-server:
     build:
       context: .
@@ -8,12 +22,13 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8787"
-      DATABASE_URL: "file:/data/tavily_bridge.db"
-    volumes:
-      - tavily_bridge_sqlite:/data
+      DATABASE_URL: "postgresql://mcp_nexus:mcp_nexus_dev@postgres:5432/mcp_nexus?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8787:8787"
     command: ["sh", "docker/entrypoint.sh"]
 
 volumes:
-  tavily_bridge_sqlite: {}
+  mcp_nexus_postgres: {}

@@ -5,6 +5,7 @@ node -v >/dev/null
 
 mkdir -p /data
 
-npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+npx prisma db push --schema packages/db/prisma/schema.prisma --skip-generate
 
 exec node packages/bridge-server/dist/index.js
+

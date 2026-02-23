@@ -99,8 +99,8 @@ function resolveGrokSearchEnabled(c: WorkerContext, settingsMap: Record<string, 
 }
 
 function resolveGrokModelDefault(c: WorkerContext, settingsMap: Record<string, string>): string {
-  const raw = (settingsMap.grokModelDefault ?? c.env.GROK_MODEL_DEFAULT ?? 'grok-4-latest').trim();
-  return raw || 'grok-4-latest';
+  const raw = (settingsMap.grokModelDefault ?? c.env.GROK_MODEL_DEFAULT ?? 'grok-4.2-beta').trim();
+  return raw || 'grok-4.2-beta';
 }
 
 function resolveGrokExtraSourcesDefault(c: WorkerContext, settingsMap: Record<string, string>): number {

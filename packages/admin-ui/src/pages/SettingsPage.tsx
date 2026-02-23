@@ -32,11 +32,17 @@ export function SettingsPage({
   const [savingSearchSourceMode, setSavingSearchSourceMode] = useState(false);
   const [savingResearch, setSavingResearch] = useState(false);
   const [grokSearchEnabledDraft, setGrokSearchEnabledDraft] = useState(false);
-  const [grokModelDraft, setGrokModelDraft] = useState('grok-4-latest');
+  const [grokModelDraft, setGrokModelDraft] = useState('grok-4.2-beta');
   const [grokExtraSourcesDraft, setGrokExtraSourcesDraft] = useState<number | ''>(0);
   const [grokSourceModeDraft, setGrokSourceModeDraft] = useState<SearchSourceMode>('combined');
   const [grokKeyStrategyDraft, setGrokKeyStrategyDraft] = useState<'round_robin' | 'random'>('round_robin');
   const [savingGrokSettings, setSavingGrokSettings] = useState(false);
+  const [grokProviderBaseUrlDraft, setGrokProviderBaseUrlDraft] = useState('https://api.x.ai/v1');
+  const [grokProviderBaseUrlSaved, setGrokProviderBaseUrlSaved] = useState('https://api.x.ai/v1');
+  const [grokProviderApiKeyDraft, setGrokProviderApiKeyDraft] = useState('');
+  const [grokProviderApiKeyConfigured, setGrokProviderApiKeyConfigured] = useState(false);
+  const [grokProviderApiKeyMasked, setGrokProviderApiKeyMasked] = useState<string | null>(null);
+  const [savingGrokProvider, setSavingGrokProvider] = useState(false);
   const baseUrlNeedsScheme = useMemo(() => value.apiBaseUrl.trim() !== '' && !/^https?:\/\//.test(value.apiBaseUrl.trim()), [value.apiBaseUrl]);
 
   useEffect(() => {
@@ -44,13 +50,24 @@ export function SettingsPage({
     if (!signedIn) {
       setServerInfo(null);
       setServerInfoError(null);
+      setGrokProviderApiKeyDraft('');
       return;
     }
     setServerInfoError(null);
     api
       .getServerInfo()
-      .then((info) => {
+      .then(async (info) => {
         if (cancelled) return;
+        let provider = {
+          baseUrl: info.grokProviderBaseUrl ?? 'https://api.x.ai/v1',
+          apiKeyConfigured: Boolean(info.grokProviderApiKeyConfigured),
+          apiKeyMasked: info.grokProviderApiKeyMasked ?? null
+        };
+        try {
+          provider = await api.getGrokProviderConfig();
+        } catch {
+          // Fallback to server-info metadata for backwards compatibility.
+        }
         setServerInfo(info);
         setServerStrategyDraft(info.tavilyKeySelectionStrategy);
         setSearchSourceModeDraft(info.searchSourceMode);
@@ -59,6 +76,11 @@ export function SettingsPage({
         setGrokExtraSourcesDraft(info.grokExtraSourcesDefault);
         setGrokSourceModeDraft(info.grokSearchSourceMode);
         setGrokKeyStrategyDraft(info.grokKeySelectionStrategy);
+        setGrokProviderBaseUrlDraft(provider.baseUrl);
+        setGrokProviderBaseUrlSaved(provider.baseUrl);
+        setGrokProviderApiKeyConfigured(provider.apiKeyConfigured);
+        setGrokProviderApiKeyMasked(provider.apiKeyMasked);
+        setGrokProviderApiKeyDraft('');
       })
       .catch((e: any) => {
         if (cancelled) return;
@@ -146,6 +168,10 @@ export function SettingsPage({
     serverInfo
   ]);
 
+  const grokProviderDirty = useMemo(() => {
+    return grokProviderBaseUrlDraft.trim() !== grokProviderBaseUrlSaved.trim() || Boolean(grokProviderApiKeyDraft.trim());
+  }, [grokProviderApiKeyDraft, grokProviderBaseUrlDraft, grokProviderBaseUrlSaved]);
+
   async function saveGrokSettings() {
     if (!signedIn) {
       toast.push({ title: t('toast.signInRequired'), message: t('toast.signInRequiredMessage') });
@@ -183,6 +209,63 @@ export function SettingsPage({
       toast.push({ title: t('toast.updateFailed'), message: msg });
     } finally {
       setSavingGrokSettings(false);
+    }
+  }
+
+  async function saveGrokProvider() {
+    if (!signedIn) {
+      toast.push({ title: t('toast.signInRequired'), message: t('toast.signInRequiredMessage') });
+      return;
+    }
+    const baseUrl = grokProviderBaseUrlDraft.trim();
+    const nextApiKey = grokProviderApiKeyDraft.trim();
+    const payload: { baseUrl?: string; apiKey?: string } = {};
+    if (baseUrl !== grokProviderBaseUrlSaved.trim()) {
+      payload.baseUrl = baseUrl;
+    }
+    if (nextApiKey) {
+      payload.apiKey = nextApiKey;
+    }
+    if (!payload.baseUrl && !payload.apiKey) {
+      return;
+    }
+
+    setSavingGrokProvider(true);
+    try {
+      const updated = await api.updateGrokProviderConfig(payload);
+      setGrokProviderBaseUrlDraft(updated.baseUrl);
+      setGrokProviderBaseUrlSaved(updated.baseUrl);
+      setGrokProviderApiKeyConfigured(updated.apiKeyConfigured);
+      setGrokProviderApiKeyMasked(updated.apiKeyMasked);
+      setGrokProviderApiKeyDraft('');
+      toast.push({ title: t('toast.updated'), message: 'Grok provider connection updated.' });
+    } catch (e: any) {
+      const msg = typeof e?.message === 'string' ? e.message : tc('errors.unknownError');
+      toast.push({ title: t('toast.updateFailed'), message: msg });
+    } finally {
+      setSavingGrokProvider(false);
+    }
+  }
+
+  async function clearGrokProviderApiKey() {
+    if (!signedIn) {
+      toast.push({ title: t('toast.signInRequired'), message: t('toast.signInRequiredMessage') });
+      return;
+    }
+    setSavingGrokProvider(true);
+    try {
+      const updated = await api.updateGrokProviderConfig({ clearApiKey: true });
+      setGrokProviderBaseUrlDraft(updated.baseUrl);
+      setGrokProviderBaseUrlSaved(updated.baseUrl);
+      setGrokProviderApiKeyConfigured(updated.apiKeyConfigured);
+      setGrokProviderApiKeyMasked(updated.apiKeyMasked);
+      setGrokProviderApiKeyDraft('');
+      toast.push({ title: t('toast.updated'), message: 'Saved Grok provider API key cleared.' });
+    } catch (e: any) {
+      const msg = typeof e?.message === 'string' ? e.message : tc('errors.unknownError');
+      toast.push({ title: t('toast.updateFailed'), message: msg });
+    } finally {
+      setSavingGrokProvider(false);
     }
   }
 
@@ -448,7 +531,7 @@ export function SettingsPage({
                           value={grokModelDraft}
                           onChange={(e) => setGrokModelDraft(e.target.value)}
                           disabled={savingGrokSettings}
-                          placeholder="grok-4-latest"
+                          placeholder="grok-4.2-beta"
                         />
                       </div>
                       <div className="stack">
@@ -516,6 +599,68 @@ export function SettingsPage({
                         GrokSearch is enabled but no Grok keys are active.
                       </div>
                     ) : null}
+
+                    <div className="stack mt-4">
+                      <div className="help">Grok provider connection</div>
+                      <div className="grid2">
+                        <div className="stack">
+                          <label className="label" htmlFor="grok-provider-base-url">Grok API base URL</label>
+                          <input
+                            id="grok-provider-base-url"
+                            className="input mono"
+                            value={grokProviderBaseUrlDraft}
+                            onChange={(e) => setGrokProviderBaseUrlDraft(e.target.value)}
+                            disabled={savingGrokProvider}
+                            placeholder="https://api.x.ai/v1"
+                            autoComplete="off"
+                          />
+                          <div className="help">Leave empty to use server fallback from environment/default.</div>
+                        </div>
+                        <div className="stack">
+                          <label className="label" htmlFor="grok-provider-api-key">Grok API key</label>
+                          <input
+                            id="grok-provider-api-key"
+                            className="input mono"
+                            type="password"
+                            value={grokProviderApiKeyDraft}
+                            onChange={(e) => setGrokProviderApiKeyDraft(e.target.value)}
+                            disabled={savingGrokProvider}
+                            placeholder={grokProviderApiKeyConfigured ? 'Configured (enter new key to rotate)' : 'xai-...'}
+                            autoComplete="off"
+                          />
+                          <div className="help">Stored encrypted at rest. Only a masked value is ever returned.</div>
+                        </div>
+                      </div>
+                      <div className="flex gap-3 items-center flex-wrap">
+                        {grokProviderApiKeyConfigured ? (
+                          <span className="badge mono" data-variant="success">
+                            configured: {grokProviderApiKeyMasked ?? '(masked)'}
+                          </span>
+                        ) : (
+                          <span className="badge mono" data-variant="warning">
+                            API key not configured
+                          </span>
+                        )}
+                        {grokProviderApiKeyConfigured ? (
+                          <button
+                            className="btn btn--sm"
+                            data-variant="ghost"
+                            onClick={clearGrokProviderApiKey}
+                            disabled={savingGrokProvider}
+                          >
+                            Clear saved key
+                          </button>
+                        ) : null}
+                        <button
+                          className="btn btn--sm"
+                          data-variant="primary"
+                          onClick={saveGrokProvider}
+                          disabled={savingGrokProvider || !grokProviderDirty}
+                        >
+                          {savingGrokProvider ? tc('status.saving') : tc('actions.save')}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="help">{tc('status.loading')}</div>

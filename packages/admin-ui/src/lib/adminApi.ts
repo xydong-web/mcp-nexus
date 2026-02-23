@@ -137,6 +137,17 @@ export type ServerInfoDto = {
   grokSearchSourceMode: SearchSourceMode;
   grokKeySelectionStrategy: 'round_robin' | 'random';
   grokActiveKeyCount: number;
+  grokProviderBaseUrl?: string;
+  grokProviderApiKeyConfigured?: boolean;
+  grokProviderApiKeyMasked?: string | null;
+  grokProviderSource?: 'database' | 'env' | 'none' | string;
+};
+
+export type GrokProviderConfigDto = {
+  baseUrl: string;
+  apiKeyConfigured: boolean;
+  apiKeyMasked: string | null;
+  source: 'database' | 'env' | 'none' | string;
 };
 
 export type CostEstimateDto = {
@@ -240,6 +251,12 @@ export type AdminApi = {
       >
     >
   ) => Promise<ServerInfoDto & { ok: true }>;
+  getGrokProviderConfig: () => Promise<GrokProviderConfigDto>;
+  updateGrokProviderConfig: (input: {
+    baseUrl?: string;
+    apiKey?: string;
+    clearApiKey?: boolean;
+  }) => Promise<GrokProviderConfigDto & { ok?: true }>;
 
   getMetrics: () => Promise<MetricsDto>;
 
@@ -374,6 +391,8 @@ export function createAdminApi(
   return {
     getServerInfo: () => getJson('/admin/api/server-info'),
     updateServerInfo: (input) => requestJson('/admin/api/server-info', { method: 'PATCH', body: JSON.stringify(input) }),
+    getGrokProviderConfig: () => getJson('/admin/api/grok-provider'),
+    updateGrokProviderConfig: (input) => requestJson('/admin/api/grok-provider', { method: 'PATCH', body: JSON.stringify(input) }),
 
     getMetrics: () => getJson('/admin/api/metrics'),
 

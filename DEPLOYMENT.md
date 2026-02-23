@@ -11,7 +11,7 @@ This guide provides step-by-step instructions for deploying MCP Nexus to product
 
 ### For Node.js Deployment
 - Node.js 18+ installed
-- SQLite3 installed
+- PostgreSQL 14+ reachable from runtime
 - Process manager (PM2, systemd, or Docker)
 - Reverse proxy (nginx, Caddy) for HTTPS
 
@@ -69,26 +69,25 @@ KEY_ENCRYPTION_SECRET=$(openssl rand -base64 32)
 # Generate new admin token
 ADMIN_API_TOKEN=$(openssl rand -hex 32)
 
-# Set production database path
-DATABASE_URL="file:./production.db"
+# Set production PostgreSQL connection string
+DATABASE_URL="postgresql://mcp_nexus:CHANGE_ME@db.example.com:5432/mcp_nexus?schema=public"
 
 # Set server configuration
 HOST="0.0.0.0"
 PORT="8787"
 ```
 
-### Step 3: Run Database Migrations
+### Step 3: Bootstrap Database Schema
 
 ```bash
-cd packages/db
-DATABASE_URL="file:./production.db" npx prisma migrate deploy
-cd ../..
+DATABASE_URL="postgresql://mcp_nexus:CHANGE_ME@db.example.com:5432/mcp_nexus?schema=public" \
+  npm run db:bootstrap
 ```
 
-Verify migrations:
+Verify schema objects:
 ```bash
-sqlite3 packages/db/production.db ".tables"
-# Should show: TavilyKey, BraveKey, GrokKey, ClientToken, TavilyToolUsage, BraveToolUsage, GrokToolUsage, AuditLog, ServerSetting
+psql "$DATABASE_URL" -c '\\dt'
+# Should include TavilyKey, BraveKey, GrokKey, ClientToken, TavilyToolUsage, BraveToolUsage, GrokToolUsage, AuditLog, ServerSetting, RegistrationRun
 ```
 
 ### Step 4: Start Server
@@ -148,7 +147,6 @@ docker build -t mcp-nexus .
 docker run -d \
   --name mcp-nexus \
   -p 8787:8787 \
-  -v $(pwd)/production.db:/app/production.db \
   -v $(pwd)/.env:/app/.env \
   --restart unless-stopped \
   mcp-nexus
@@ -239,13 +237,22 @@ curl -X POST https://mcp.yourdomain.com/admin/api/grok-keys \
   -H "Content-Type: application/json" \
   -d '{"label": "Production Grok Key", "key": "xai-xxx..."}'
 
+# Optional: manage upstream Grok provider endpoint/key via unified settings API
+curl -X PATCH https://mcp.yourdomain.com/admin/api/grok-provider \
+  -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "baseUrl": "https://api.x.ai/v1",
+    "apiKey": "xai-xxx..."
+  }'
+
 # Enable Grok tools and defaults
 curl -X PATCH https://mcp.yourdomain.com/admin/api/server-info \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "grokSearchEnabled": true,
-    "grokModelDefault": "grok-4-latest",
+    "grokModelDefault": "grok-4.2-beta",
     "grokExtraSourcesDefault": 4,
     "grokSearchSourceMode": "combined",
     "grokKeySelectionStrategy": "round_robin"
@@ -354,14 +361,10 @@ Monitor these key metrics:
 
 ### Backup
 
-**Node.js (SQLite)**:
+**Node.js (PostgreSQL)**:
 ```bash
-# Daily backup script
-#!/bin/bash
-DATE=$(date +%Y%m%d)
-sqlite3 production.db ".backup backup-$DATE.db"
-# Keep last 30 days
-find . -name "backup-*.db" -mtime +30 -delete
+# Daily logical backup
+pg_dump "$DATABASE_URL" --format=custom --file "backup-$(date +%Y%m%d).dump"
 ```
 
 **Cloudflare (D1)**:
@@ -382,10 +385,8 @@ npm ci --include=dev
 # Build
 npm run build
 
-# Run new migrations (if any)
-cd packages/db
-npx prisma migrate deploy
-cd ../..
+# Sync schema to database (PostgreSQL)
+npm run db:bootstrap
 
 # Restart server
 pm2 restart mcp-nexus
@@ -399,7 +400,7 @@ sudo systemctl restart mcp-nexus
 
 1. Check logs: `pm2 logs mcp-nexus` or `journalctl -u mcp-nexus`
 2. Verify environment variables: `./scripts/verify-production-config.sh`
-3. Check database: `sqlite3 production.db ".tables"`
+3. Check database connectivity: `psql "$DATABASE_URL" -c '\dt'`
 4. Verify port is not in use: `lsof -i :8787`
 
 ### TypeScript build errors (missing `process`, `node:*`, `console`, or `fetch`)
@@ -438,12 +439,12 @@ Check and adjust rate limits:
 - Per-client: `MCP_RATE_LIMIT_PER_MINUTE` (default: 60)
 - Per-token: Set custom `rateLimit` when creating token
 
-### Database locked errors
+### Database connection errors
 
-SQLite doesn't handle high concurrency well. Consider:
-1. Increase `PRAGMA busy_timeout`
-2. Use WAL mode: `PRAGMA journal_mode=WAL`
-3. Or migrate to PostgreSQL for high-traffic deployments
+If PostgreSQL errors appear:
+1. Validate `DATABASE_URL` format and credentials.
+2. Verify network allow-list/firewall between runtime and database.
+3. Run `npm run db:bootstrap` after schema updates.
 
 ## Security Best Practices
 

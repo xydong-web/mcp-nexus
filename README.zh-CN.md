@@ -25,7 +25,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-SQLite 数据存储在挂载到 `/data` 的 Docker 卷中。
+PostgreSQL 数据存储在挂载到 `/data` 的 Docker 卷中。
 
 然后打开：
 -   管理后台：`http://localhost:8787/admin`
@@ -37,7 +37,7 @@ SQLite 数据存储在挂载到 `/data` 的 Docker 卷中。
 
 ```bash
 npm install
-npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+npm run db:bootstrap
 npm run dev:bridge-server
 ```
 
@@ -81,7 +81,7 @@ npm run dev:bridge-server
 
 | 变量                  | 描述                                                                                             | 默认值                             |
 | --------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------- |
-| `DATABASE_URL`        | 数据库的连接字符串。对于本地设置，推荐使用基于文件的 SQLite 数据库。                             | `file:./tavily_bridge.db`          |
+| `DATABASE_URL`        | 数据库的连接字符串。对于本地设置，推荐使用基于文件的 PostgreSQL 数据库。                             | `postgresql://mcp_nexus:mcp_nexus_dev@localhost:5432/mcp_nexus?schema=public`          |
 | `KEY_ENCRYPTION_SECRET` | 一个 32 字节（256 位）的密钥，用于加密和解密存储在数据库中的上游 API 密钥。                      | (在示例中生成)                     |
 | `ADMIN_API_TOKEN`     | 用于访问管理 API 的 Bearer Token。                                                               | (在示例中生成)                     |
 | `HOST`                | 服务器监听的主机地址。                                                                           | `0.0.0.0`                          |
@@ -186,3 +186,4 @@ npm run dev:bridge-server
 ### Docker Compose（自托管）
 
 附带的 `docker-compose.yml` 和 `Dockerfile` 为自托管提供了一个生产就绪的设置。
+

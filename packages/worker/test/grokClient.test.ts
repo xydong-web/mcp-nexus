@@ -79,7 +79,7 @@ describe('grokWebSearch enrichment', () => {
       {
         apiKey: 'xai-test',
         sourceMode: 'combined',
-        modelDefault: 'grok-4-latest',
+        modelDefault: 'grok-4.2-beta',
         extraSourcesDefault: 0,
         tavilyApiKey: 'tvly-test',
         braveApiKey: 'brave-test',
@@ -127,7 +127,7 @@ describe('grokWebSearch enrichment', () => {
       {
         apiKey: 'xai-test',
         sourceMode: 'combined',
-        modelDefault: 'grok-4-latest',
+        modelDefault: 'grok-4.2-beta',
         extraSourcesDefault: 0,
         tavilyApiKey: 'tvly-test',
         braveApiKey: 'brave-test',
@@ -143,4 +143,3 @@ describe('grokWebSearch enrichment', () => {
     expect(cached?.length).toBeGreaterThan(0);
   });
 });
-

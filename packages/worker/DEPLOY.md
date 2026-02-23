@@ -93,7 +93,7 @@ Set in `wrangler.jsonc` or via `wrangler vars put`:
 | `TAVILY_KEY_SELECTION_STRATEGY` | Key selection: round_robin, random | round_robin |
 | `ADMIN_UI_URL` | URL to Admin UI (if hosted separately) | - |
 | `GROK_SEARCH_ENABLED` | Enable/disable Grok tools (`web_search`, `get_sources`, `web_fetch`, `web_map`) | false |
-| `GROK_MODEL_DEFAULT` | Default Grok model for `web_search` | grok-4-latest |
+| `GROK_MODEL_DEFAULT` | Default Grok model for `web_search` | grok-4.2-beta |
 | `GROK_EXTRA_SOURCES_DEFAULT` | Default supplemental source count for Grok `web_search` | 0 |
 | `GROK_SEARCH_SOURCE_MODE` | Grok supplemental source mode | combined |
 | `GROK_KEY_SELECTION_STRATEGY` | Grok key selection strategy (`round_robin`, `random`) | round_robin |
@@ -140,7 +140,7 @@ curl -X PATCH https://your-worker.workers.dev/admin/api/server-info \
   -H "Content-Type: application/json" \
   -d '{
     "grokSearchEnabled": true,
-    "grokModelDefault": "grok-4-latest",
+    "grokModelDefault": "grok-4.2-beta",
     "grokExtraSourcesDefault": 4,
     "grokSearchSourceMode": "combined",
     "grokKeySelectionStrategy": "round_robin"

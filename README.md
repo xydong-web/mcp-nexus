@@ -25,7 +25,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-SQLite data is stored in the Docker volume mounted at `/data`.
+PostgreSQL data is stored in the Docker volume mounted at `/var/lib/postgresql/data`.
 
 Then open:
 -   Admin UI: `http://localhost:8787/admin`
@@ -37,7 +37,7 @@ Requires the env vars in `.env.example` to be set.
 
 ```bash
 npm install
-npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+npm run db:bootstrap
 npm run dev:bridge-server
 ```
 
@@ -85,7 +85,7 @@ Configuration is managed via environment variables. Copy `.env.example` to `.env
 
 | Variable              | Description                                                                                               | Default                            |
 | --------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `DATABASE_URL`        | Connection string for the database. For local setups, a file-based SQLite DB is recommended.                | `file:./tavily_bridge.db`          |
+| `DATABASE_URL`        | Connection string for the database. Node runtime now requires PostgreSQL semantics.                | `postgresql://mcp_nexus:mcp_nexus_dev@localhost:5432/mcp_nexus?schema=public`          |
 | `KEY_ENCRYPTION_SECRET` | A 32-byte (256-bit) secret key used for encrypting and decrypting upstream API keys stored in the database. | (generated in example)             |
 | `ADMIN_API_TOKEN`     | Bearer token for accessing the Admin API.                                                                 | (generated in example)             |
 | `HOST`                | The host address for the server to listen on.                                                             | `0.0.0.0`                          |
@@ -155,7 +155,7 @@ Grok tools are feature-flagged and can be controlled in **Admin UI → Settings*
 | Variable | Description | Default |
 | --- | --- | --- |
 | `GROK_SEARCH_ENABLED` | Enables/disables Grok tool exposure (`web_search`, `get_sources`, `web_fetch`, `web_map`). | `false` |
-| `GROK_MODEL_DEFAULT` | Default Grok model used by `web_search` when caller does not override `model`. | `grok-4-latest` |
+| `GROK_MODEL_DEFAULT` | Default Grok model used by `web_search` when caller does not override `model`. | `grok-4.2-beta` |
 | `GROK_EXTRA_SOURCES_DEFAULT` | Default extra supplemental source count for `web_search`. | `0` |
 | `GROK_SEARCH_SOURCE_MODE` | Grok supplemental source mode: `tavily_only`, `brave_only`, `combined`, `brave_prefer_tavily_fallback`. | `combined` |
 | `GROK_KEY_SELECTION_STRATEGY` | Grok key selection strategy: `round_robin` or `random`. | `round_robin` |

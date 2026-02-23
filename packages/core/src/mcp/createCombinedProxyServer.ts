@@ -185,7 +185,7 @@ export function createCombinedProxyServer({
             (await getGrokSourceMode?.(extra))
             ?? (await getSearchSourceMode?.(extra))
             ?? 'combined';
-          const modelDefault = await getGrokModelDefault?.() ?? 'grok-4-latest';
+          const modelDefault = await getGrokModelDefault?.() ?? 'grok-4.2-beta';
           const extraSourcesDefault = normalizeExtraSources(await getGrokExtraSourcesDefault?.() ?? 0);
           const response = await grokClient.webSearch(args as any, {
             sourceMode,
