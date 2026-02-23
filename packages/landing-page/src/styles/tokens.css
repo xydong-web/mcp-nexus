@@ -1,0 +1,162 @@
+:root {
+  /* ========================================
+     Design Tokens (Unified Design System)
+     ======================================== */
+
+  /* Spacing Scale (8px Grid) */
+  --space-0: 0;
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-6: 48px;
+  --space-8: 64px;
+  --space-10: 80px;
+  --space-12: 96px;
+
+  /* Typography */
+  --font-sans: 'Fira Sans', 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'Fira Code', 'JetBrains Mono', 'SFMono-Regular', ui-monospace, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+
+  /* Font Size */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 17px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+
+  /* Font Weight */
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+  --font-extrabold: 800;
+
+  /* Line Height */
+  --lh-tight: 1.25;
+  --lh-base: 1.5;
+  --lh-loose: 1.75;
+
+  /* Semantic Colors (Light Mode) */
+  --color-bg: #eef8f1;
+  --color-surface-1: #fbfffc;
+  --color-surface-2: #f2fbf6;
+  --color-surface-hover: rgba(16, 185, 129, 0.08);
+
+  --color-text: #0b1b13;
+  --color-text-muted: #3f5a4e;
+  --color-text-inverse: #f4fff9;
+
+  --color-border: rgba(17, 72, 48, 0.16);
+  --color-border-subtle: rgba(17, 72, 48, 0.08);
+
+  --color-primary: #0f9f63;
+  --color-primary-hover: #0b8a54;
+  --color-primary-light: rgba(15, 159, 99, 0.16);
+  --color-primary-dark: #08663f;
+
+  --color-cta: #19c37d;
+  --color-cta-hover: #16af70;
+
+  --color-success: #168f4a;
+  --color-success-light: rgba(22, 143, 74, 0.14);
+  --color-warning: #b86f06;
+  --color-warning-light: rgba(184, 111, 6, 0.16);
+  --color-danger: #c02626;
+  --color-danger-light: rgba(192, 38, 38, 0.14);
+
+  /* Z-Index Layers */
+  --z-base: 0;
+  --z-sticky: 40;
+  --z-dropdown: 50;
+  --z-drawer: 100;
+  --z-modal: 120;
+  --z-toast: 110;
+
+  /* Shadows */
+  --shadow: 0 6px 22px rgba(6, 43, 27, 0.12);
+  --shadow-lg: 0 18px 46px rgba(6, 43, 27, 0.18);
+  --shadow-xl: 0 26px 68px rgba(6, 43, 27, 0.24);
+
+  /* Border Radius */
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-lg: 22px;
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-base: 220ms ease;
+  --transition-slow: 320ms ease;
+
+  /* ========================================
+     Legacy Compatibility Aliases
+     ======================================== */
+  --bg: var(--color-bg);
+  --panel: var(--color-surface-2);
+  --panel-solid: var(--color-surface-1);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --border: var(--color-border);
+  --border-light: var(--color-border-subtle);
+
+  --primary: var(--color-primary);
+  --primary-hover: var(--color-primary-hover);
+  --primary-light: var(--color-primary-light);
+  --primary-dark: var(--color-primary-dark);
+  --primary-2: var(--color-primary-hover);
+  --cta: var(--color-cta);
+  --cta-hover: var(--color-cta-hover);
+
+  --danger: var(--color-danger);
+  --danger-light: var(--color-danger-light);
+  --success: var(--color-success);
+  --success-light: var(--color-success-light);
+  --warning: var(--color-warning);
+  --warning-light: var(--color-warning-light);
+}
+
+html[data-theme='dark'] {
+  /* Semantic Colors (Dark Mode / OLED) */
+  --color-bg: #020807;
+  --color-surface-1: #07120e;
+  --color-surface-2: #0d1a15;
+  --color-surface-hover: rgba(74, 222, 128, 0.14);
+
+  --color-text: #e7fff2;
+  --color-text-muted: #98c8b0;
+  --color-text-inverse: #04110b;
+
+  --color-border: rgba(110, 231, 183, 0.25);
+  --color-border-subtle: rgba(110, 231, 183, 0.14);
+
+  --color-primary: #4ade80;
+  --color-primary-hover: #6ee7a4;
+  --color-primary-light: rgba(74, 222, 128, 0.2);
+  --color-primary-dark: #2fb565;
+
+  --color-cta: #34d399;
+  --color-cta-hover: #4ade80;
+
+  --color-success: #4ade80;
+  --color-success-light: rgba(74, 222, 128, 0.16);
+  --color-warning: #fbbf24;
+  --color-warning-light: rgba(251, 191, 36, 0.2);
+  --color-danger: #f87171;
+  --color-danger-light: rgba(248, 113, 113, 0.18);
+
+  /* Legacy aliases */
+  --bg: var(--color-bg);
+  --panel: var(--color-surface-1);
+  --panel-solid: var(--color-surface-2);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --border: var(--color-border);
+  --border-light: var(--color-border-subtle);
+
+  /* Shadow adjustments for dark mode */
+  --shadow: 0 8px 26px rgba(0, 0, 0, 0.38);
+  --shadow-lg: 0 18px 52px rgba(0, 0, 0, 0.52);
+  --shadow-xl: 0 28px 74px rgba(0, 0, 0, 0.64);
+}

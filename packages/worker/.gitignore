@@ -1,0 +1,12 @@
+# Wrangler local development
+.dev.vars
+.wrangler/
+
+# Environment files
+.env
+.env.local
+
+# Build output
+dist/
+dist-test*/
+node_modules/

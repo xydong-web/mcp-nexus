@@ -1,0 +1,1026 @@
+import type { WorkerContext } from '../context.js';
+import { D1Client } from '../db/d1.js';
+import {
+  selectTavilyKey,
+  selectBraveKey,
+  selectGrokKey,
+  markTavilyKeyCooldown,
+  markTavilyKeyInvalid,
+  markBraveKeyInvalid,
+  markGrokKeyCooldown,
+  markGrokKeyInvalid
+} from '../services/keyPool.js';
+import { tavilySearch, tavilyExtract, tavilyCrawl, tavilyMap, tavilyResearch, TavilyError } from '../services/tavilyClient.js';
+import { braveWebSearch, braveLocalSearch, BraveError } from '../services/braveClient.js';
+import { grokWebSearch, grokGetSources, grokWebFetch, grokWebMap, GrokError } from '../services/grokClient.js';
+import { logGrokToolUsage } from '../services/grokUsageLog.js';
+import { parseSearchSourceMode } from './searchSource.js';
+import { extractBraveWebResults, extractBraveLocalResults } from './braveFormat.js';
+import { mergeAndDedupe } from './combinedMerge.js';
+
+interface JsonRpcRequest {
+  jsonrpc: '2.0';
+  method: string;
+  params?: Record<string, unknown>;
+  id?: string | number;
+}
+
+interface JsonRpcResponse {
+  jsonrpc: '2.0';
+  id?: string | number;
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
+}
+
+type McpToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+};
+
+/**
+ * Rate limiting helpers
+ */
+type RateLimitScope = 'global' | 'client';
+
+type RateLimitCheckResult =
+  | { ok: true }
+  | { ok: false; scope: RateLimitScope; retryAfterMs: number };
+
+type DurableRateLimitResponse = {
+  allowed: boolean;
+  remaining: number;
+  resetAt: number;
+};
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const GROK_TOOL_NAMES = ['web_search', 'get_sources', 'web_fetch', 'web_map'] as const;
+type GrokToolName = (typeof GROK_TOOL_NAMES)[number];
+const GROK_TOOL_SET = new Set<string>(GROK_TOOL_NAMES);
+
+function isGrokToolName(value: string): value is GrokToolName {
+  return GROK_TOOL_SET.has(value);
+}
+
+function parseBooleanSetting(raw: unknown, fallback: boolean): boolean {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+}
+
+function parseBoundedInt(raw: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+async function getServerSettingsMap(db: D1Client): Promise<Record<string, string>> {
+  const settings = await db.getServerSettings();
+  const map: Record<string, string> = {};
+  for (const setting of settings) {
+    map[setting.key] = setting.value;
+  }
+  return map;
+}
+
+function resolveResearchEnabled(c: WorkerContext, settingsMap: Record<string, string>): boolean {
+  return parseBooleanSetting(settingsMap.researchEnabled, c.env.TAVILY_RESEARCH_ENABLED !== 'false');
+}
+
+function resolveGrokSearchEnabled(c: WorkerContext, settingsMap: Record<string, string>): boolean {
+  return parseBooleanSetting(settingsMap.grokSearchEnabled, parseBooleanSetting(c.env.GROK_SEARCH_ENABLED, false));
+}
+
+function resolveGrokModelDefault(c: WorkerContext, settingsMap: Record<string, string>): string {
+  const raw = (settingsMap.grokModelDefault ?? c.env.GROK_MODEL_DEFAULT ?? 'grok-4-latest').trim();
+  return raw || 'grok-4-latest';
+}
+
+function resolveGrokExtraSourcesDefault(c: WorkerContext, settingsMap: Record<string, string>): number {
+  return parseBoundedInt(
+    settingsMap.grokExtraSourcesDefault ?? c.env.GROK_EXTRA_SOURCES_DEFAULT,
+    0,
+    0,
+    20
+  );
+}
+
+function resolveGrokSourceMode(c: WorkerContext, settingsMap: Record<string, string>) {
+  const raw =
+    settingsMap.grokSearchSourceMode
+    ?? settingsMap.searchSourceMode
+    ?? c.env.GROK_SEARCH_SOURCE_MODE
+    ?? c.env.SEARCH_SOURCE_MODE;
+  return parseSearchSourceMode(raw, 'combined');
+}
+
+function resolveGrokKeySelectionStrategy(c: WorkerContext, settingsMap: Record<string, string>): 'round_robin' | 'random' {
+  const raw = (settingsMap.grokKeySelectionStrategy ?? c.env.GROK_KEY_SELECTION_STRATEGY ?? 'round_robin').trim().toLowerCase();
+  return raw === 'random' ? 'random' : 'round_robin';
+}
+
+function resolveGrokTimeoutMs(c: WorkerContext): number {
+  return parsePositiveInt(c.env.GROK_TIMEOUT_MS, 20_000);
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function checkLimit(
+  c: WorkerContext,
+  key: string,
+  limit: number
+): Promise<{ allowed: boolean; retryAfterMs: number }> {
+  const id = c.env.RATE_LIMITER.idFromName(key);
+  const stub = c.env.RATE_LIMITER.get(id);
+
+  const url = new URL('https://rate-limiter.internal/check');
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('window', String(RATE_LIMIT_WINDOW_MS));
+
+  const response = await stub.fetch(url.toString(), { method: 'GET' });
+  const payload = await response.json<DurableRateLimitResponse>();
+
+  const retryAfterMs = Math.max(0, (payload?.resetAt ?? Date.now()) - Date.now());
+  return {
+    allowed: Boolean(payload?.allowed),
+    retryAfterMs
+  };
+}
+
+async function enforceMcpRateLimits(
+  c: WorkerContext,
+  clientTokenId: string
+): Promise<RateLimitCheckResult> {
+  const globalLimit = parsePositiveInt(c.env.MCP_GLOBAL_RATE_LIMIT_PER_MINUTE, 600);
+  const defaultPerClientLimit = parsePositiveInt(c.env.MCP_RATE_LIMIT_PER_MINUTE, 60);
+
+  // Phase 3.5: Use per-token rate limit if set, otherwise use global default
+  const tokenRateLimit = c.get('clientTokenRateLimit');
+  const perClientLimit = tokenRateLimit ?? defaultPerClientLimit;
+
+  const clientCheck = await checkLimit(c, `client:${clientTokenId}`, perClientLimit);
+  if (!clientCheck.allowed) {
+    return { ok: false, scope: 'client', retryAfterMs: clientCheck.retryAfterMs };
+  }
+
+  const globalCheck = await checkLimit(c, 'global', globalLimit);
+  if (!globalCheck.allowed) {
+    return { ok: false, scope: 'global', retryAfterMs: globalCheck.retryAfterMs };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Handle MCP JSON-RPC requests
+ */
+export async function handleMcpRequest(c: WorkerContext): Promise<Response> {
+  try {
+    const body = await c.req.json<JsonRpcRequest>();
+    const { method, params, id } = body;
+
+    // clientAuth middleware should populate this, but validate defensively.
+    const clientTokenId = c.get('clientTokenId');
+    if (!clientTokenId) {
+      return c.json(
+        {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32600, message: 'Authorization required' }
+        },
+        401
+      );
+    }
+
+    const rateLimitResult = await enforceMcpRateLimits(c, clientTokenId);
+    if (!rateLimitResult.ok) {
+      return c.json(
+        {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32029, message: 'Rate limit exceeded', data: { scope: rateLimitResult.scope, retryAfterMs: rateLimitResult.retryAfterMs } }
+        },
+        429
+      );
+    }
+
+    let response: JsonRpcResponse;
+
+    switch (method) {
+      case 'initialize':
+        response = {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2024-11-05',
+            serverInfo: {
+              name: 'mcp-nexus',
+              version: '1.0.0',
+            },
+            capabilities: {
+              tools: {},
+            },
+          },
+        };
+        break;
+
+      case 'tools/list':
+        response = {
+          jsonrpc: '2.0',
+          id,
+          result: { tools: await getToolsList(c) },
+        };
+        break;
+
+      case 'tools/call':
+        response = await handleToolCall(c, params, id);
+        break;
+
+      default:
+        response = {
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32601, message: `Method not found: ${method}` },
+        };
+    }
+
+    return c.json(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({
+      jsonrpc: '2.0',
+      error: { code: -32603, message },
+    }, 500);
+  }
+}
+
+async function handleToolCall(
+  c: WorkerContext,
+  params: Record<string, unknown> | undefined,
+  id: string | number | undefined
+): Promise<JsonRpcResponse> {
+  const toolName = params?.name as string;
+  const toolArgs = (params?.arguments || {}) as Record<string, unknown>;
+
+  // Phase 3.4: Check if tool is allowed for this token
+  const allowedTools = c.get('clientTokenAllowedTools') as unknown;
+  if (allowedTools !== null && allowedTools !== undefined) {
+    try {
+      const allowedToolsArray = Array.isArray(allowedTools)
+        ? allowedTools
+        : (typeof allowedTools === 'string' ? JSON.parse(allowedTools) : []);
+
+      if (Array.isArray(allowedToolsArray) && allowedToolsArray.length > 0) {
+        if (!allowedToolsArray.includes(toolName)) {
+          return {
+            jsonrpc: '2.0',
+            id,
+            error: {
+              code: -32600,
+              message: `Tool '${toolName}' is not allowed for this token. Allowed tools: ${allowedToolsArray.join(', ')}`
+            },
+          };
+        }
+      }
+    } catch (error) {
+      console.error('Error parsing allowedTools:', error);
+    }
+  }
+
+  try {
+    let result: McpToolResult;
+
+    // Route to appropriate handler
+    if (toolName.startsWith('tavily_')) {
+      result = await handleTavilyTool(c, toolName, toolArgs);
+    } else if (toolName.startsWith('brave_')) {
+      result = await handleBraveTool(c, toolName, toolArgs);
+    } else if (isGrokToolName(toolName)) {
+      result = await handleGrokTool(c, toolName, toolArgs);
+    } else {
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32601, message: `Unknown tool: ${toolName}` },
+      };
+    }
+
+    return {
+      jsonrpc: '2.0',
+      id,
+      result,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return {
+      jsonrpc: '2.0',
+      id,
+      result: {
+        content: [{ type: 'text', text: `Error: ${message}` }],
+        isError: true,
+      },
+    };
+  }
+}
+
+async function handleTavilyTool(
+  c: WorkerContext,
+  toolName: string,
+  args: Record<string, unknown>
+): Promise<McpToolResult> {
+  const db = new D1Client(c.env.DB);
+  const settingsMap = await getServerSettingsMap(db);
+  const keyInfo = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+
+  if (!keyInfo) {
+    return {
+      content: [{ type: 'text', text: 'Error: No Tavily API keys configured. Please add keys in the Admin UI.' }],
+    };
+  }
+
+  try {
+    let result: unknown;
+
+    switch (toolName) {
+      case 'tavily_search':
+        result = await tavilySearch(keyInfo.apiKey, args as any);
+        break;
+      case 'tavily_extract':
+        result = await tavilyExtract(keyInfo.apiKey, args as any);
+        break;
+      case 'tavily_crawl':
+        result = await tavilyCrawl(keyInfo.apiKey, args as any);
+        break;
+      case 'tavily_map':
+        result = await tavilyMap(keyInfo.apiKey, args as any);
+        break;
+      case 'tavily_research':
+        if (!resolveResearchEnabled(c, settingsMap)) {
+          return {
+            content: [{ type: 'text', text: 'Tavily Research is disabled by the server administrator.' }],
+            isError: true,
+          };
+        }
+        result = await tavilyResearch(keyInfo.apiKey, args as any);
+        break;
+      default:
+        throw new Error(`Unknown Tavily tool: ${toolName}`);
+    }
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (error) {
+    if (error instanceof TavilyError) {
+      if (error.status === 401) {
+        await markTavilyKeyInvalid(db, keyInfo.keyId);
+      } else if (error.status === 429) {
+        await markTavilyKeyCooldown(db, keyInfo.keyId);
+      }
+    }
+    throw error;
+  }
+}
+
+async function handleBraveTool(
+  c: WorkerContext,
+  toolName: string,
+  args: Record<string, unknown>
+): Promise<McpToolResult> {
+  const db = new D1Client(c.env.DB);
+
+  // Get search source mode
+  const settingsMap = await getServerSettingsMap(db);
+  const dbMode = settingsMap.searchSourceMode;
+  const searchSourceMode = parseSearchSourceMode(dbMode || c.env.SEARCH_SOURCE_MODE, 'brave_prefer_tavily_fallback');
+
+  const query = String(args.query ?? '');
+  const count = typeof args.count === 'number' ? args.count : 10;
+  const offset = typeof args.offset === 'number' ? args.offset : 0;
+
+  // Handle tavily_only mode
+  if (searchSourceMode === 'tavily_only') {
+    const tavilyKeyInfo = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    if (!tavilyKeyInfo) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'No Tavily API keys configured' }) }],
+        isError: true
+      };
+    }
+
+    try {
+      const result = await tavilySearch(tavilyKeyInfo.apiKey, { query, max_results: count });
+      const formatted = (result.results || []).map((r: any) => ({
+        title: String(r?.title ?? ''),
+        url: String(r?.url ?? ''),
+        description: String(r?.content ?? '') || undefined
+      }));
+      return {
+        content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+      };
+    } catch (error) {
+      if (error instanceof TavilyError) {
+        if (error.status === 401 || error.status === 403) {
+          await markTavilyKeyInvalid(db, tavilyKeyInfo.keyId);
+        } else if (error.status === 429) {
+          await markTavilyKeyCooldown(db, tavilyKeyInfo.keyId, 60000);
+        }
+      }
+      throw error;
+    }
+  }
+
+  // Handle brave_only mode
+  if (searchSourceMode === 'brave_only') {
+    const braveKeyInfo = await selectBraveKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    if (!braveKeyInfo) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'Brave Search is not configured. Please add a Brave API key.' }) }],
+        isError: true
+      };
+    }
+
+    try {
+      const result = toolName === 'brave_web_search'
+        ? await braveWebSearch(braveKeyInfo.apiKey, args as any)
+        : await braveLocalSearch(braveKeyInfo.apiKey, args as any);
+
+      const formatted = toolName === 'brave_web_search'
+        ? extractBraveWebResults(result)
+        : extractBraveLocalResults(result);
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+      };
+    } catch (error) {
+      if (error instanceof BraveError) {
+        if (error.status === 401 || error.status === 403) {
+          await markBraveKeyInvalid(db, braveKeyInfo.keyId);
+        }
+      }
+      throw error;
+    }
+  }
+
+  // Handle combined mode
+  if (searchSourceMode === 'combined') {
+    // If offset > 0, only use Brave (Tavily doesn't support offset)
+    if (offset > 0) {
+      const braveKeyInfo = await selectBraveKey(db, c.env.KEY_ENCRYPTION_SECRET);
+      if (!braveKeyInfo) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'Brave Search is not configured for pagination.' }) }],
+          isError: true
+        };
+      }
+
+      try {
+        const result = toolName === 'brave_web_search'
+          ? await braveWebSearch(braveKeyInfo.apiKey, args as any)
+          : await braveLocalSearch(braveKeyInfo.apiKey, args as any);
+
+        const formatted = toolName === 'brave_web_search'
+          ? extractBraveWebResults(result)
+          : extractBraveLocalResults(result);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+        };
+      } catch (error) {
+        if (error instanceof BraveError && (error.status === 401 || error.status === 403)) {
+          await markBraveKeyInvalid(db, braveKeyInfo.keyId);
+        }
+        throw error;
+      }
+    }
+
+    // Combined mode: call both in parallel
+    const promises: Promise<{ source: 'tavily' | 'brave'; results: any[]; error?: any }>[] = [];
+
+    // Tavily
+    const tavilyKeyInfo = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    if (tavilyKeyInfo) {
+      promises.push(
+        tavilySearch(tavilyKeyInfo.apiKey, { query, max_results: count })
+          .then(res => ({
+            source: 'tavily' as const,
+            results: (res.results || []).map((r: any) => ({
+              title: String(r?.title ?? ''),
+              url: String(r?.url ?? ''),
+              description: String(r?.content ?? '') || undefined
+            }))
+          }))
+          .catch(err => ({ source: 'tavily' as const, results: [], error: err }))
+      );
+    }
+
+    // Brave
+    const braveKeyInfo = await selectBraveKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    if (braveKeyInfo) {
+      promises.push(
+        (toolName === 'brave_web_search'
+          ? braveWebSearch(braveKeyInfo.apiKey, args as any)
+          : braveLocalSearch(braveKeyInfo.apiKey, args as any)
+        )
+          .then(res => ({
+            source: 'brave' as const,
+            results: toolName === 'brave_web_search'
+              ? extractBraveWebResults(res)
+              : extractBraveLocalResults(res)
+          }))
+          .catch(err => ({ source: 'brave' as const, results: [], error: err }))
+      );
+    }
+
+    const settled = await Promise.allSettled(promises);
+
+    // Extract results
+    const tavilyResult = settled[0]?.status === 'fulfilled' ? settled[0].value : { source: 'tavily' as const, results: [], error: settled[0]?.reason };
+    const braveResult = settled[1]?.status === 'fulfilled' ? settled[1].value : (settled[1] ? { source: 'brave' as const, results: [], error: settled[1].reason } : null);
+
+    const tavilyFailed = tavilyResult?.error !== undefined;
+    const braveFailed = braveResult?.error !== undefined;
+
+    // If both failed, return error
+    if (tavilyFailed && braveFailed) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'Both Tavily and Brave search failed.' }) }],
+        isError: true
+      };
+    }
+
+    // Merge and deduplicate
+    const merged = mergeAndDedupe({
+      tavily: tavilyResult?.results ?? [],
+      brave: braveResult?.results ?? [],
+      count
+    });
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(merged, null, 2) }]
+    };
+  }
+
+  // Default: brave_prefer_tavily_fallback
+  const braveKeyInfo = await selectBraveKey(db, c.env.KEY_ENCRYPTION_SECRET);
+
+  // If no Brave key, use Tavily
+  if (!braveKeyInfo) {
+    const tavilyKeyInfo = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    if (!tavilyKeyInfo) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'No API keys configured' }) }],
+        isError: true
+      };
+    }
+
+    try {
+      const result = await tavilySearch(tavilyKeyInfo.apiKey, { query, max_results: count });
+      const formatted = (result.results || []).map((r: any) => ({
+        title: String(r?.title ?? ''),
+        url: String(r?.url ?? ''),
+        description: String(r?.content ?? '') || undefined
+      }));
+      return {
+        content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+      };
+    } catch (error) {
+      if (error instanceof TavilyError) {
+        if (error.status === 401 || error.status === 403) {
+          await markTavilyKeyInvalid(db, tavilyKeyInfo.keyId);
+        } else if (error.status === 429) {
+          await markTavilyKeyCooldown(db, tavilyKeyInfo.keyId, 60000);
+        }
+      }
+      throw error;
+    }
+  }
+
+  // Try Brave first
+  try {
+    const result = toolName === 'brave_web_search'
+      ? await braveWebSearch(braveKeyInfo.apiKey, args as any)
+      : await braveLocalSearch(braveKeyInfo.apiKey, args as any);
+
+    const formatted = toolName === 'brave_web_search'
+      ? extractBraveWebResults(result)
+      : extractBraveLocalResults(result);
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+    };
+  } catch (error) {
+    if (error instanceof BraveError) {
+      if (error.status === 401 || error.status === 403) {
+        await markBraveKeyInvalid(db, braveKeyInfo.keyId);
+      }
+
+      // Fallback to Tavily on error
+      const tavilyKeyInfo = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+      if (tavilyKeyInfo) {
+        try {
+          const result = await tavilySearch(tavilyKeyInfo.apiKey, { query, max_results: count });
+          const formatted = (result.results || []).map((r: any) => ({
+            title: String(r?.title ?? ''),
+            url: String(r?.url ?? ''),
+            description: String(r?.content ?? '') || undefined
+          }));
+          return {
+            content: [{ type: 'text', text: JSON.stringify(formatted, null, 2) }]
+          };
+        } catch (tavilyError) {
+          if (tavilyError instanceof TavilyError) {
+            if (tavilyError.status === 401 || tavilyError.status === 403) {
+              await markTavilyKeyInvalid(db, tavilyKeyInfo.keyId);
+            } else if (tavilyError.status === 429) {
+              await markTavilyKeyCooldown(db, tavilyKeyInfo.keyId, 60000);
+            }
+          }
+          // If Tavily also fails, throw original Brave error
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+async function handleGrokTool(
+  c: WorkerContext,
+  toolName: GrokToolName,
+  args: Record<string, unknown>
+): Promise<McpToolResult> {
+  const db = new D1Client(c.env.DB);
+  const settingsMap = await getServerSettingsMap(db);
+  const grokSearchEnabled = resolveGrokSearchEnabled(c, settingsMap);
+
+  if (!grokSearchEnabled) {
+    return {
+      content: [{ type: 'text', text: 'GrokSearch is disabled by the server administrator.' }],
+      isError: true
+    };
+  }
+
+  const startedAt = Date.now();
+  const sourceMode = resolveGrokSourceMode(c, settingsMap);
+  const modelDefault = resolveGrokModelDefault(c, settingsMap);
+  const extraSourcesDefault = resolveGrokExtraSourcesDefault(c, settingsMap);
+  const query =
+    typeof args.query === 'string'
+      ? args.query
+      : typeof args.url === 'string'
+        ? args.url
+        : undefined;
+  const defaultArgsSummary = {
+    toolName,
+    sourceMode,
+    modelDefault,
+    extraSourcesDefault
+  };
+  let upstreamKeyId: string | null = null;
+
+  try {
+    if (toolName === 'web_search') {
+      const grokKey = await selectGrokKey(
+        db,
+        c.env.KEY_ENCRYPTION_SECRET,
+        resolveGrokKeySelectionStrategy(c, settingsMap)
+      );
+
+      if (!grokKey) {
+        const message = 'No Grok API keys configured for web_search';
+        await logGrokToolUsage(c, db, {
+          toolName,
+          upstreamKeyId: null,
+          outcome: 'error',
+          latencyMs: Date.now() - startedAt,
+          query,
+          argsSummary: defaultArgsSummary,
+          errorMessage: message
+        }).catch(() => {});
+        return {
+          content: [{ type: 'text', text: `Error: ${message}. Please add keys in the Admin UI.` }],
+          isError: true
+        };
+      }
+
+      upstreamKeyId = grokKey.keyId;
+      const includeTavily = sourceMode !== 'brave_only';
+      const includeBrave = sourceMode !== 'tavily_only';
+      const tavilyKey = includeTavily ? await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET) : null;
+      const braveKey = includeBrave ? await selectBraveKey(db, c.env.KEY_ENCRYPTION_SECRET) : null;
+
+      const result = await grokWebSearch(args, {
+        apiKey: grokKey.apiKey,
+        sourceMode,
+        modelDefault,
+        extraSourcesDefault,
+        tavilyApiKey: tavilyKey?.apiKey,
+        braveApiKey: braveKey?.apiKey,
+        grokApiUrl: c.env.GROK_API_URL,
+        grokTimeoutMs: resolveGrokTimeoutMs(c),
+        firecrawlApiKey: c.env.FIRECRAWL_API_KEY,
+        firecrawlApiUrl: c.env.FIRECRAWL_API_URL
+      });
+
+      await logGrokToolUsage(c, db, {
+        toolName,
+        upstreamKeyId,
+        outcome: 'success',
+        latencyMs: Date.now() - startedAt,
+        query,
+        argsSummary: defaultArgsSummary
+      }).catch(() => {});
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+      };
+    }
+
+    if (toolName === 'get_sources') {
+      const result = await grokGetSources(args);
+      const hasError = isObjectRecord(result) && typeof result.error === 'string' && result.error.length > 0;
+
+      await logGrokToolUsage(c, db, {
+        toolName,
+        outcome: hasError ? 'error' : 'success',
+        latencyMs: Date.now() - startedAt,
+        query: typeof args.session_id === 'string' ? args.session_id : undefined,
+        argsSummary: { sessionIdProvided: typeof args.session_id === 'string' }
+      }).catch(() => {});
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        isError: hasError
+      };
+    }
+
+    if (toolName === 'web_fetch') {
+      const tavilyKey = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+      const result = await grokWebFetch(args, {
+        tavilyApiKey: tavilyKey?.apiKey,
+        firecrawlApiKey: c.env.FIRECRAWL_API_KEY,
+        firecrawlApiUrl: c.env.FIRECRAWL_API_URL,
+        timeoutMs: resolveGrokTimeoutMs(c)
+      });
+
+      await logGrokToolUsage(c, db, {
+        toolName,
+        outcome: 'success',
+        latencyMs: Date.now() - startedAt,
+        query,
+        argsSummary: {}
+      }).catch(() => {});
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+      };
+    }
+
+    const tavilyKey = await selectTavilyKey(db, c.env.KEY_ENCRYPTION_SECRET);
+    const result = await grokWebMap(args, {
+      tavilyApiKey: tavilyKey?.apiKey
+    });
+
+    await logGrokToolUsage(c, db, {
+      toolName,
+      outcome: 'success',
+      latencyMs: Date.now() - startedAt,
+      query,
+      argsSummary: {}
+    }).catch(() => {});
+
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+    };
+  } catch (error) {
+    if (error instanceof GrokError && upstreamKeyId) {
+      if (error.status === 401 || error.status === 403) {
+        await markGrokKeyInvalid(db, upstreamKeyId).catch(() => {});
+      } else if (error.status === 429) {
+        const cooldownMs =
+          typeof error.retryAfterMs === 'number' && error.retryAfterMs > 0
+            ? Math.max(1_000, Math.floor(error.retryAfterMs))
+            : 60_000;
+        await markGrokKeyCooldown(db, upstreamKeyId, cooldownMs).catch(() => {});
+      }
+    }
+
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    await logGrokToolUsage(c, db, {
+      toolName,
+      upstreamKeyId,
+      outcome: 'error',
+      latencyMs: Date.now() - startedAt,
+      query,
+      argsSummary: defaultArgsSummary,
+      errorMessage: message
+    }).catch(() => {});
+
+    return {
+      content: [{ type: 'text', text: `Error: ${message}` }],
+      isError: true
+    };
+  }
+}
+
+async function getToolsList(c: WorkerContext) {
+  const db = new D1Client(c.env.DB);
+  const settingsMap = await getServerSettingsMap(db);
+  const researchEnabled = resolveResearchEnabled(c, settingsMap);
+  const grokSearchEnabled = resolveGrokSearchEnabled(c, settingsMap);
+  const tools = [
+    {
+      name: 'tavily_search',
+      description: 'Search the web for current information on any topic. Use for news, facts, or data beyond your knowledge cutoff. Returns snippets and source URLs.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          search_depth: { type: 'string', enum: ['basic', 'advanced', 'fast', 'ultra-fast'], default: 'basic', description: "The depth of the search. 'basic' for generic results, 'advanced' for more thorough search, 'fast' for optimized low latency with high relevance, 'ultra-fast' for prioritizing latency above all else" },
+          max_results: { type: 'number', default: 10, minimum: 5, maximum: 20, description: 'The maximum number of search results to return' },
+          include_images: { type: 'boolean', default: false, description: 'Include a list of query-related images in the response' },
+          include_raw_content: { type: 'boolean', default: false, description: 'Include the cleaned and parsed HTML content of each search result' },
+          topic: { type: 'string', enum: ['general'], default: 'general', description: 'The category of the search' },
+          include_domains: { type: 'array', items: { type: 'string' }, description: 'A list of domains to specifically include in the search results' },
+          exclude_domains: { type: 'array', items: { type: 'string' }, description: 'List of domains to specifically exclude' },
+          time_range: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: 'The time range back from the current date to include in the search results' },
+          country: { type: 'string', description: 'Boost search results from a specific country' },
+          include_image_descriptions: { type: 'boolean', default: false, description: 'Include a list of query-related images and their descriptions in the response' },
+          include_favicon: { type: 'boolean', default: false, description: 'Whether to include the favicon URL for each result' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'tavily_extract',
+      description: 'Extract content from URLs. Returns raw page content in markdown or text format.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urls: { type: 'array', items: { type: 'string' }, description: 'List of URLs to extract content from' },
+          extract_depth: { type: 'string', enum: ['basic', 'advanced'], default: 'basic', description: "Use 'advanced' for LinkedIn, protected sites, or tables/embedded content" },
+          format: { type: 'string', enum: ['markdown', 'text'], default: 'markdown', description: 'Output format' },
+          query: { type: 'string', description: 'Query to rerank content chunks by relevance' },
+          include_images: { type: 'boolean', default: false, description: 'Include images from pages' },
+          include_favicon: { type: 'boolean', default: false, description: 'Include favicon URLs' },
+        },
+        required: ['urls'],
+      },
+    },
+    {
+      name: 'tavily_crawl',
+      description: 'Crawl a website starting from a URL. Extracts content from pages with configurable depth and breadth.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The root URL to begin the crawl' },
+          max_depth: { type: 'integer', default: 1, minimum: 1, description: 'Max depth of the crawl' },
+          max_breadth: { type: 'integer', default: 20, minimum: 1, description: 'Max number of links to follow per level' },
+          limit: { type: 'integer', default: 50, minimum: 1, description: 'Total number of links the crawler will process' },
+          format: { type: 'string', enum: ['markdown', 'text'], default: 'markdown', description: 'The format of the extracted content' },
+          extract_depth: { type: 'string', enum: ['basic', 'advanced'], default: 'basic', description: 'Advanced extraction retrieves more data' },
+          instructions: { type: 'string', description: 'Natural language instructions for the crawler' },
+          allow_external: { type: 'boolean', default: true, description: 'Whether to return external links' },
+          include_favicon: { type: 'boolean', default: false, description: 'Whether to include the favicon URL' },
+        },
+        required: ['url'],
+      },
+    },
+    {
+      name: 'tavily_map',
+      description: "Map a website's structure. Returns a list of URLs found starting from the base URL.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The root URL to begin the mapping' },
+          max_depth: { type: 'integer', default: 1, minimum: 1, description: 'Max depth of the mapping' },
+          max_breadth: { type: 'integer', default: 20, minimum: 1, description: 'Max number of links to follow per level' },
+          limit: { type: 'integer', default: 50, minimum: 1, description: 'Total number of links the crawler will process' },
+          instructions: { type: 'string', description: 'Natural language instructions for the crawler' },
+          allow_external: { type: 'boolean', default: true, description: 'Whether to return external links' },
+        },
+        required: ['url'],
+      },
+    },
+    ...(researchEnabled ? [{
+      name: 'tavily_research',
+      description: 'Perform comprehensive research on a given topic or question. Use this tool when you need to gather information from multiple sources to answer a question or complete a task. Returns a detailed response based on the research findings.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          input: { type: 'string', description: 'A comprehensive description of the research task' },
+          model: { type: 'string', enum: ['mini', 'pro', 'auto'], default: 'auto', description: "Defines the degree of depth of the research. 'mini' is good for narrow tasks with few subtopics. 'pro' is good for broad tasks with many subtopics. 'auto' automatically selects the best model." },
+        },
+        required: ['input'],
+      },
+    }] : []),
+    {
+      name: 'brave_web_search',
+      description: 'Performs a web search using the Brave Search API. Use for general web searches for information, facts, and current topics. Returns a JSON array of results.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          count: { type: 'number', default: 10, minimum: 1, maximum: 20, description: 'Number of results (1-20)' },
+          offset: { type: 'number', default: 0, minimum: 0, maximum: 9, description: 'Pagination offset (0-9)' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'brave_local_search',
+      description: 'Search for local businesses and places using the Brave Search API. Implementations commonly fall back to web search if local results are unavailable. Returns a JSON array of results.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Local search terms' },
+          count: { type: 'number', default: 10, minimum: 1, maximum: 20, description: 'Number of results (1-20)' },
+        },
+        required: ['query'],
+      },
+    },
+    ...(grokSearchEnabled
+      ? [
+          {
+            name: 'web_search',
+            description: 'Run GrokSearch web search with optional supplementary source enrichment.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string', description: 'Natural-language query to search for.' },
+                platform: { type: 'string', description: 'Optional platform focus such as X, Reddit, or GitHub.' },
+                model: { type: 'string', description: 'Optional Grok model override for this request.' },
+                extra_sources: {
+                  type: 'number',
+                  minimum: 0,
+                  maximum: 20,
+                  description: 'Optional supplementary source count. If omitted, server default is used.'
+                },
+                max_results: {
+                  type: 'number',
+                  minimum: 1,
+                  maximum: 50,
+                  description: 'Optional cap applied after merged source deduplication.'
+                }
+              },
+              required: ['query']
+            }
+          },
+          {
+            name: 'get_sources',
+            description: 'Fetch source list cached from a previous web_search call using session_id.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                session_id: { type: 'string', description: 'Session ID returned by web_search.' }
+              },
+              required: ['session_id']
+            }
+          },
+          {
+            name: 'web_fetch',
+            description: 'Fetch and extract markdown content from a URL with provider fallback.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                url: { type: 'string', description: 'HTTP(S) URL to fetch.' },
+                timeout_ms: {
+                  type: 'number',
+                  minimum: 1000,
+                  maximum: 120000,
+                  description: 'Optional request timeout in milliseconds.'
+                }
+              },
+              required: ['url']
+            }
+          },
+          {
+            name: 'web_map',
+            description: 'Map website links from a root URL with optional crawl constraints.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                url: { type: 'string', description: 'Root URL to map.' },
+                instructions: { type: 'string', description: 'Optional crawler instructions.' },
+                max_depth: { type: 'number', minimum: 1, maximum: 5, default: 1 },
+                max_breadth: { type: 'number', minimum: 1, maximum: 500, default: 20 },
+                limit: { type: 'number', minimum: 1, maximum: 500, default: 50 }
+              },
+              required: ['url']
+            }
+          }
+        ]
+      : []),
+  ];
+  return tools;
+}

@@ -1,0 +1,23 @@
+{
+  "generatedAt": "2026-02-23T05:01:34.919Z",
+  "workspaceRoot": "C:\\Users\\donxy\\OneDrive\\Documents\\Code\\traviygrok",
+  "sourceRepo": "mcp-nexus-main/mcp-nexus-main",
+  "sourceOpenSpec": "openspec",
+  "outputDir": "release/mcp-nexus",
+  "excludedTopLevel": [
+    "node_modules",
+    ".git",
+    ".wrangler",
+    ".ace-tool",
+    ".codex",
+    ".vscode",
+    "release",
+    "openspec"
+  ],
+  "excludedExtensions": [
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz"
+  ]
+}

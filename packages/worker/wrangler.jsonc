@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-nexus",
+  "main": "./src/index.ts",
+  "compatibility_date": "2026-01-01",
+
+  // D1 Database binding - auto-provisioned by Deploy Button
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mcp-nexus-db",
+      "database_id": "placeholder"
+    }
+  ],
+
+  // Durable Objects for MCP sessions and rate limiting
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_SESSION",
+        "class_name": "McpSession"
+      },
+      {
+        "name": "RATE_LIMITER",
+        "class_name": "RateLimiter"
+      }
+    ]
+  },
+
+  // Migrations for Durable Objects (required on first deploy)
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["McpSession", "RateLimiter"]
+    }
+  ],
+
+  // Environment variables (non-secret)
+  "vars": {
+    "MCP_RATE_LIMIT_PER_MINUTE": "60",
+    "MCP_GLOBAL_RATE_LIMIT_PER_MINUTE": "600",
+    "TAVILY_KEY_SELECTION_STRATEGY": "round_robin",
+    "SEARCH_SOURCE_MODE": "brave_prefer_tavily_fallback",
+    "TAVILY_USAGE_LOG_MODE": "preview",
+    "BRAVE_USAGE_LOG_MODE": "preview",
+    "TAVILY_CREDITS_REFRESH_LOCK_MS": "15000"
+  },
+
+  // Static assets for Admin UI and landing page
+  // Assets are served before the worker, so /admin/assets/* are served directly
+  // Worker handles /admin, /admin/*, /mcp, /health, etc.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "html_handling": "auto-trailing-slash"
+  }
+}
