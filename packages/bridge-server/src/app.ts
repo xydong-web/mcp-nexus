@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import express from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import { PrismaClient } from '@mcp-nexus/db';
 import {
@@ -53,8 +54,8 @@ const FALLBACK_SEARCH_SOURCE_MODE = parseSearchSourceMode(process.env.SEARCH_SOU
 const BRAVE_OVERFLOW = parseBraveOverflowMode(process.env.BRAVE_OVERFLOW);
 const BRAVE_MAX_QUEUE_MS = Number(process.env.BRAVE_MAX_QUEUE_MS ?? String(30_000));
 
-function asyncHandler(fn: (req: any, res: any, next: any) => Promise<void>) {
-  return (req: any, res: any, next: any) => {
+function asyncHandler(fn: (req: Request, res: Response, next: NextFunction) => Promise<void>): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
   };
 }

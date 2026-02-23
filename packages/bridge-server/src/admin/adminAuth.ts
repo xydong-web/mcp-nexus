@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import type { RequestHandler } from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 function secureCompareTokens(token: string, expectedToken: string): boolean {
   const tokenBuffer = Buffer.from(token, 'utf8');
@@ -13,7 +13,7 @@ function secureCompareTokens(token: string, expectedToken: string): boolean {
 }
 
 export function requireAdminToken(): RequestHandler {
-  return (req, res, next) => {
+  return (req: Request, res: Response, next: NextFunction) => {
     const adminToken = process.env.ADMIN_API_TOKEN;
     if (!adminToken) {
       res.status(500).json({
