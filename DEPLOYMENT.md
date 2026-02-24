@@ -75,7 +75,17 @@ DATABASE_URL="postgresql://mcp_nexus:CHANGE_ME@db.example.com:5432/mcp_nexus?sch
 # Set server configuration
 HOST="0.0.0.0"
 PORT="8787"
+
+# Optional Docker startup controls (runtime image entrypoint)
+DB_BOOTSTRAP_MODE="required"                # required | best-effort | skip
+DB_BOOTSTRAP_RETRIES="5"                    # Positive integer
+DB_BOOTSTRAP_RETRY_DELAY_SECONDS="3"        # Positive integer
 ```
+
+`DB_BOOTSTRAP_MODE` guidance:
+- `required` (default): startup fails if `prisma db push` fails after retries.
+- `best-effort`: startup continues even if bootstrap fails.
+- `skip`: skip `prisma db push` entirely during startup.
 
 ### Step 3: Bootstrap Database Schema
 
@@ -402,6 +412,14 @@ sudo systemctl restart mcp-nexus
 2. Verify environment variables: `./scripts/verify-production-config.sh`
 3. Check database connectivity: `psql "$DATABASE_URL" -c '\dt'`
 4. Verify port is not in use: `lsof -i :8787`
+
+### Docker build succeeded but runtime is CRASHED/SUSPENDED
+
+If build logs are successful but the service crashes immediately at runtime:
+1. Check container startup logs for `[entrypoint]` messages.
+2. Verify `DATABASE_URL` is set and reachable from runtime.
+3. Temporarily set `DB_BOOTSTRAP_MODE=best-effort` to bypass transient bootstrap failures.
+4. If you intentionally bootstrap elsewhere, set `DB_BOOTSTRAP_MODE=skip`.
 
 ### TypeScript build errors (missing `process`, `node:*`, `console`, or `fetch`)
 

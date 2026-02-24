@@ -22,7 +22,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY --from=build /app /app
+RUN chmod +x /app/docker/entrypoint.sh
 
 EXPOSE 8787
 
-CMD ["sh", "docker/entrypoint.sh"]
+CMD ["/app/docker/entrypoint.sh"]
