@@ -149,6 +149,26 @@ export function SettingsPage({
     }
   }
 
+  async function toggleGrokTools(enabled: boolean) {
+    if (!signedIn) {
+      toast.push({ title: t('toast.signInRequired'), message: t('toast.signInRequiredMessage') });
+      return;
+    }
+    setSavingGrokSettings(true);
+    try {
+      const res = await api.updateServerInfo({ grokSearchEnabled: enabled });
+      setServerInfo(res);
+      setGrokSearchEnabledDraft(res.grokSearchEnabled);
+      const status = res.grokSearchEnabled ? 'enabled' : 'disabled';
+      toast.push({ title: t('toast.updated'), message: `Grok tools ${status}.` });
+    } catch (e: any) {
+      const msg = typeof e?.message === 'string' ? e.message : tc('errors.unknownError');
+      toast.push({ title: t('toast.updateFailed'), message: msg });
+    } finally {
+      setSavingGrokSettings(false);
+    }
+  }
+
   const grokDirty = useMemo(() => {
     if (!serverInfo) return false;
     const draftExtra = typeof grokExtraSourcesDraft === 'number' ? grokExtraSourcesDraft : Number(grokExtraSourcesDraft || 0);
@@ -238,7 +258,29 @@ export function SettingsPage({
       setGrokProviderApiKeyConfigured(updated.apiKeyConfigured);
       setGrokProviderApiKeyMasked(updated.apiKeyMasked);
       setGrokProviderApiKeyDraft('');
-      toast.push({ title: t('toast.updated'), message: 'Grok provider connection updated.' });
+
+      let autoEnabled = false;
+      if (nextApiKey && serverInfo && !serverInfo.grokSearchEnabled) {
+        const toggled = await api.updateServerInfo({ grokSearchEnabled: true });
+        setServerInfo(toggled);
+        setGrokSearchEnabledDraft(toggled.grokSearchEnabled);
+        autoEnabled = toggled.grokSearchEnabled;
+      }
+
+      try {
+        const latest = await api.getServerInfo();
+        setServerInfo(latest);
+        setGrokSearchEnabledDraft(latest.grokSearchEnabled);
+      } catch {
+        // Keep provider update successful even if status refresh fails.
+      }
+
+      toast.push({
+        title: t('toast.updated'),
+        message: autoEnabled
+          ? 'Grok provider connection updated. Grok tools enabled.'
+          : 'Grok provider connection updated.'
+      });
     } catch (e: any) {
       const msg = typeof e?.message === 'string' ? e.message : tc('errors.unknownError');
       toast.push({ title: t('toast.updateFailed'), message: msg });
@@ -511,17 +553,20 @@ export function SettingsPage({
                     </div>
                     <div className="grid2">
                       <div className="stack">
-                        <label className="label" htmlFor="grok-enabled-check">Enable Grok tools</label>
-                        <label className="flex gap-2 items-center" htmlFor="grok-enabled-check">
-                          <input
-                            id="grok-enabled-check"
-                            type="checkbox"
-                            checked={grokSearchEnabledDraft}
-                            onChange={(e) => setGrokSearchEnabledDraft(e.target.checked)}
+                        <label className="label">Enable Grok tools</label>
+                        <div className="flex gap-2 items-center flex-wrap">
+                          <button
+                            className="btn btn--sm"
+                            data-variant={grokSearchEnabledDraft ? 'danger' : 'primary'}
+                            onClick={() => toggleGrokTools(!grokSearchEnabledDraft)}
                             disabled={savingGrokSettings}
-                          />
+                          >
+                            {savingGrokSettings
+                              ? tc('status.saving')
+                              : (grokSearchEnabledDraft ? 'Disable Grok tools' : 'Enable Grok tools')}
+                          </button>
                           <span className="help">Expose web_search/get_sources/web_fetch/web_map</span>
-                        </label>
+                        </div>
                       </div>
                       <div className="stack">
                         <label className="label" htmlFor="grok-model-input">Default Grok model</label>

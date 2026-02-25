@@ -2,7 +2,9 @@ import type { PrismaClient } from '@mcp-nexus/db';
 import { parseTavilyKeySelectionStrategy, parseSearchSourceMode, type TavilyKeySelectionStrategy, type SearchSourceMode } from '@mcp-nexus/core';
 import { decryptAes256Gcm, encryptAes256Gcm } from '../crypto/crypto.js';
 
-const REFRESH_MS = Number(process.env.SERVER_SETTINGS_REFRESH_MS ?? '5000');
+const RAW_REFRESH_MS = Number(process.env.SERVER_SETTINGS_REFRESH_MS ?? '5000');
+const REFRESH_MS = Number.isFinite(RAW_REFRESH_MS) ? Math.max(250, Math.floor(RAW_REFRESH_MS)) : 5000;
+const GROK_REFRESH_MS = Math.min(REFRESH_MS, 1000);
 const KEY_TAVILY_STRATEGY = 'tavilyKeySelectionStrategy';
 const KEY_SEARCH_SOURCE_MODE = 'searchSourceMode';
 const KEY_RESEARCH_ENABLED = 'researchEnabled';
@@ -302,11 +304,11 @@ export class ServerSettings {
           : row?.value === 'false'
             ? false
             : this.fallbackGrokSearchEnabled;
-        this.cachedGrokSearchEnabled = { enabled, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        this.cachedGrokSearchEnabled = { enabled, expiresAtMs: Date.now() + GROK_REFRESH_MS };
         return enabled;
       } catch {
         const fallback = this.cachedGrokSearchEnabled?.enabled ?? this.fallbackGrokSearchEnabled;
-        this.cachedGrokSearchEnabled = { enabled: fallback, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        this.cachedGrokSearchEnabled = { enabled: fallback, expiresAtMs: Date.now() + GROK_REFRESH_MS };
         return fallback;
       } finally {
         this.inFlightGrokSearchEnabled = null;
@@ -538,7 +540,7 @@ export class ServerSettings {
     this.inFlightGrokProvider = (async () => {
       try {
         const config = await this.readGrokProviderConfig();
-        this.cachedGrokProvider = { config, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        this.cachedGrokProvider = { config, expiresAtMs: Date.now() + GROK_REFRESH_MS };
         return config;
       } catch {
         const fallbackApiKey = this.fallbackGrokProviderApiKey;
@@ -549,7 +551,7 @@ export class ServerSettings {
           apiKeyMasked: fallbackApiKey ? maskGrokProviderApiKey(fallbackApiKey) : null,
           source: fallbackApiKey ? 'env' : 'none'
         };
-        this.cachedGrokProvider = { config: fallback, expiresAtMs: Date.now() + Math.max(250, REFRESH_MS) };
+        this.cachedGrokProvider = { config: fallback, expiresAtMs: Date.now() + GROK_REFRESH_MS };
         return fallback;
       } finally {
         this.inFlightGrokProvider = null;
