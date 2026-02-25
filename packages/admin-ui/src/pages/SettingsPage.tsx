@@ -594,7 +594,7 @@ export function SettingsPage({
                         {savingGrokSettings ? tc('status.saving') : tc('actions.save')}
                       </button>
                     </div>
-                    {grokSearchEnabledDraft && serverInfo.grokActiveKeyCount === 0 ? (
+                    {grokSearchEnabledDraft && serverInfo.grokActiveKeyCount === 0 && !grokProviderApiKeyConfigured ? (
                       <div className="badge mono" data-variant="warning">
                         GrokSearch is enabled but no Grok keys are active.
                       </div>
